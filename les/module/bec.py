@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from typing import Dict
+from typing import Dict, Optional
 
 from ..util import grad
 
@@ -20,8 +20,8 @@ class BEC(nn.Module):
                 q: torch.Tensor,  # [n_atoms, n_q]
                 r: torch.Tensor, # [n_atoms, 3]
                 cell: torch.Tensor, # [batch_size, 3, 3]
-                batch: torch.Tensor = None,
-                output_index: int = None, # 0, 1, 2 to select only one component
+                batch: Optional[torch.Tensor] = None,
+                output_index: Optional[int] = None, # 0, 1, 2 to select only one component
                 ) -> torch.Tensor:
 
         if q.dim() == 1:
@@ -60,10 +60,12 @@ class BEC(nn.Module):
 
             all_P.append(polarization * self.normalization_factor)
             all_phases.append(phase)
-        P = torch.stack(all_P, dim=0)
+        P = torch.stack(all_P, dim=0).contiguous()
         phases = torch.cat(all_phases, dim=0)
 
         # take the gradient of the polarization w.r.t. the positions to get the complex BEC
+        print('p shape:', P.shape)
+        print('r shape:', r.shape)
         bec_complex = grad(y=P, x=r)
    
         # dephase

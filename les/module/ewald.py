@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from itertools import product
-from typing import Dict
+from typing import Dict, Optional, Tuple
 import numpy as np
 
 __all__ = ['Ewald']
@@ -28,7 +28,7 @@ class Ewald(nn.Module):
                 q: torch.Tensor,  # [n_atoms, n_q]
                 r: torch.Tensor, # [n_atoms, 3]
                 cell: torch.Tensor, # [batch_size, 3, 3]
-                batch: torch.Tensor = None,
+                batch: Optional[torch.Tensor] = None,
                 ) -> torch.Tensor:
         
         if q.dim() == 1:
@@ -43,24 +43,62 @@ class Ewald(nn.Module):
 
         unique_batches = torch.unique(batch)  # Get unique batch indices
 
-        results = []
-        for i in unique_batches:
-            mask = batch == i  # Create a mask for the i-th configuration
-            # Calculate the potential energy for the i-th configuration
-            r_raw_now, q_now = r[mask], q[mask]
-            if cell is not None:
-                box_now = cell[i]  # Get the box for the i-th configuration
+        # results = []
+        # for i in unique_batches:
+        #     mask = batch == i  # Create a mask for the i-th configuration
+        #     # Calculate the potential energy for the i-th configuration
+        #     r_raw_now, q_now = r[mask], q[mask]
+        #     if cell is not None:
+        #         box_now = cell[i]  # Get the box for the i-th configuration
             
-            # check if the box is periodic or not
-            if cell is None or torch.linalg.det(box_now) < 1e-6:
-                # the box is not periodic, we use the direct sum
-                pot = self.compute_potential_realspace(r_raw_now, q_now)
-            else:
-                # the box is periodic, we use the reciprocal sum
-                pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now)
-            results.append(pot)
+        #     # check if the box is periodic or not
+        #     if cell is None or torch.linalg.det(box_now) < 1e-6:
+        #         # the box is not periodic, we use the direct sum
+        #         pot = self.compute_potential_realspace(r_raw_now, q_now)
+        #     else:
+        #         # the box is periodic, we use the reciprocal sum
+        #         pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now)
+        #     results.append(pot)
 
-        return torch.stack(results, dim=0).sum(axis=1)
+        if unique_batches.shape[0] > 1:
+            # if we have multiple batches, we need to compute in parallel, faster.
+            #torch.jit.fork/wait -> asyncchrounously GPU kernel(parallel)
+            futures = [torch.jit.fork(self._compute_for_configuration,
+                                        r[batch == b],
+                                        q[batch == b],
+                                        cell[b] if cell is not None else None)
+                    for b in unique_batches]
+            results = [torch.jit.wait(f) for f in futures]
+        else:
+            results = [self._compute_for_configuration(
+                                        r[batch == b],
+                                        q[batch == b],
+                                        cell[b] if cell is not None else None)
+                    for b in unique_batches]
+        results = [x.contiguous() for x in results]
+
+        return torch.stack(results, dim=0).sum(dim=1)
+
+    def _compute_for_configuration(self,
+                               r_config: torch.Tensor,
+                               q_config: torch.Tensor,
+                               box_config: torch.Tensor,
+                               ) -> torch.Tensor:
+        if box_config is None or torch.linalg.det(box_config) < 1e-6:
+            # the box is not periodic, we use the direct sum
+            pot = self.compute_potential_realspace(r_config, q_config)
+        else:
+            # the box is periodic, we use the reciprocal sum
+            pot = self.compute_potential_triclinic(r_config, q_config, box_config)
+
+        # if hasattr(self, 'charge_neutral_lambda') and self.charge_neutral_lambda is not None:
+        #     q_mean = torch.mean(q_config)
+        #     pot_neutral = self.charge_neutral_lambda * (q_mean)**2.
+        # else:
+        #     pot_neutral = 0.0
+            
+        return pot.contiguous()
+
 
     def compute_potential_realspace(self, r_raw, q):
         # Compute pairwise distances (norm of vector differences)
@@ -92,7 +130,7 @@ class Ewald(nn.Module):
         if self.remove_self_interaction == False:
             pot += torch.sum(q ** 2) / (self.sigma * self.twopi**(3./2.))
     
-        return pot * self.norm_factor
+        return pot.contiguous() * self.norm_factor
  
 
     # Triclinic box(could be orthorhombic)
@@ -148,7 +186,7 @@ class Ewald(nn.Module):
         if self.remove_self_interaction:
             pot -= torch.sum(q**2) / (self.sigma * (2 * torch.pi)**1.5)
 
-        return pot.unsqueeze(0) * self.norm_factor
+        return pot.unsqueeze(0).contiguous() * self.norm_factor
 
     def __repr__(self):
         return f"Ewald(dl={self.dl}, sigma={self.sigma}, remove_self_interaction={self.remove_self_interaction})"

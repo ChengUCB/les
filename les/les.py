@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Optional
 
 from .module import (
     Atomwise,
@@ -67,8 +67,8 @@ class Les(nn.Module):
                batch: torch.Tensor = None,
                compute_energy: bool = True,
                compute_bec: bool = False,
-               bec_output_index: int = None, # option to compute BEC components along only one direction
-               ) -> torch.Tensor:
+               bec_output_index: Optional[int] = None, # option to compute BEC components along only one direction
+               ) -> Dict[str, Optional[torch.Tensor]]:
         """
         arguments:
         desc: torch.Tensor
@@ -83,7 +83,7 @@ class Les(nn.Module):
             batch of the system. Shape: (n_atoms,)
         """
         # check the input shapes
-        if batch == None:
+        if batch is None:
             batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=desc.device)
 
 
@@ -102,6 +102,8 @@ class Les(nn.Module):
                               cell=cell,
                               batch=batch,
                               )
+        else:
+            E_lr = None
 
         # compute the BEC
         if compute_bec:
