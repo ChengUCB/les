@@ -64,9 +64,8 @@ class BEC(nn.Module):
         phases = torch.cat(all_phases, dim=0)
 
         # take the gradient of the polarization w.r.t. the positions to get the complex BEC
-        print('p shape:', P.shape)
-        print('r shape:', r.shape)
         bec_complex = grad(y=P, x=r)
+        bec_complex = bec_complex.contiguous()
    
         # dephase
         result = bec_complex * phases.unsqueeze(1).conj()
