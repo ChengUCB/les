@@ -62,7 +62,7 @@ class Les(nn.Module):
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]
-               desc: torch.Tensor, # [n_atoms, n_features]
+               desc: Optional[torch.Tensor] = None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
