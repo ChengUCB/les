@@ -62,7 +62,7 @@ class Les(nn.Module):
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]
-               desc: torch.Tensor, # [n_atoms, n_features]
+               desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
@@ -84,16 +84,18 @@ class Les(nn.Module):
         """
         # check the input shapes
         if batch is None:
-            batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=desc.device)
+            batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)
 
 
         if latent_charges is not None:
             # check the shape of latent charges
             assert latent_charges.shape[0] == positions.shape[0]
-        else:
+        elif desc is not None:
             # compute the latent charges
             assert desc.shape[0] == positions.shape[0]
             latent_charges = self.atomwise(desc, batch)
+        else:
+            raise ValueError("Either desc or latent_charges must be provided")
 
         # compute the long-range interactions
         if compute_energy:
