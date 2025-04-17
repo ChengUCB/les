@@ -47,11 +47,12 @@ for name, module in les.named_modules():
 #scripting and save the whole model
 try:
     scripted_model = torch.jit.script(les)
-    script_result = scripted_model(desc=desc,
-                                    positions=r,
-                                    cell=box_full.unsqueeze(0),
-                                    batch=None,
-                                    compute_bec=True,)
+    for i in range(3):
+        script_result = scripted_model(desc=desc,
+                                        positions=r,
+                                        cell=box_full.unsqueeze(0),
+                                        batch=None,
+                                        compute_bec=True,)
     with tempfile.NamedTemporaryFile() as tmp:
         torch.jit.save(scripted_model, tmp.name)
     print("Model scripted and saved successfully.")
