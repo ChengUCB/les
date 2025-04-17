@@ -71,6 +71,9 @@ class BEC(nn.Module):
         return result.real
  
     def compute_pol_pbc(self, r_now, q_now, box_now):
+        #convert dtype for torchscript autograd
+        box_now = box_now.to(torch.complex64) 
+        r_now = r_now.to(torch.complex64)
         r_frac = torch.matmul(r_now, torch.linalg.inv(box_now))
         phase = torch.exp(1j * 2.* torch.pi * r_frac)
         S = torch.sum(q_now * phase, dim=0)
