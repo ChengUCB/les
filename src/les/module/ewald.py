@@ -49,7 +49,7 @@ class Ewald(nn.Module):
             # Calculate the potential energy for the i-th configuration
             r_raw_now, q_now = r[mask], q[mask]
             if cell is not None:
-                box_now = cell[i] #.detach()  # Get the box for the i-th configuration
+                box_now = cell[i].detach()  # Get the box for the i-th configuration
             
             # check if the box is periodic or not
             if cell is None or torch.linalg.det(box_now) < 1e-6:
@@ -180,11 +180,11 @@ class Ewald(nn.Module):
         pot = (kfac.unsqueeze(0) * factor.view(1, -1, 1, 1) * torch.real(sk_conj * sk)).sum(dim=[1, 2, 3])
 
         pot /= volume
-        assert cell_now.requires_grad
+        #assert cell_now.requires_grad
         # Add tinfoil boundary correction for net charge (uniform background)
-        Q = torch.sum(q)
-        bg_energy = - (2 * torch.pi * Q**2) / (2 * volume)
-        pot += bg_energy
+        #Q = torch.sum(q)
+        #bg_energy = - (2 * torch.pi * Q**2) / (2 * volume)
+        #pot += bg_energy
 
         if self.remove_self_interaction:
             pot -= torch.sum(q ** 2) / (self.sigma * self.twopi**(3./2.))
@@ -220,10 +220,11 @@ class Ewald(nn.Module):
         cell_inv = torch.linalg.inv(cell_now)
         G = 2 * torch.pi * cell_inv.T  # Reciprocal lattice vectors [3,3], G = 2π(M^{-1}).T
         #print('G', G.type())
+        # Compute Nk only once (no gradients)
+        with torch.no_grad():
+            norms = torch.norm(cell_now, dim=1)
+            Nk = [max(1, int(n.item() / self.dl)) for n in norms]
 
-        # max Nk for each axis
-        norms = torch.norm(cell_now, dim=1)
-        Nk = [max(1, int(n.item() / self.dl)) for n in norms]
         n1 = torch.arange(-Nk[0], Nk[0] + 1, device=device)
         n2 = torch.arange(-Nk[1], Nk[1] + 1, device=device)
         n3 = torch.arange(-Nk[2], Nk[2] + 1, device=device)
@@ -269,15 +270,15 @@ class Ewald(nn.Module):
         pot = (factors * kfac * S_k_sq).sum() / volume
 
         # Add tinfoil boundary correction for net charge (uniform background)
-        #Q = torch.sum(q).detach()
-        #bg_energy = - (2 * torch.pi * Q**2) / (2 * volume)
-        #pot += bg_energy        
+        Q = torch.sum(q) #.detach()
+        bg_energy = - (2 * torch.pi * Q**2) / volume
+        pot += bg_energy
 
         # Remove self-interaction if applicable
         if self.remove_self_interaction:
             pot -= torch.sum(q**2) / (self.sigma * (2 * torch.pi)**1.5)
 
-        assert cell_now.requires_grad
+        #assert cell_now.requires_grad
         return pot.unsqueeze(0) * self.norm_factor
 
     def __repr__(self):
