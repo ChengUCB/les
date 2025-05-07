@@ -49,7 +49,7 @@ class Ewald(nn.Module):
             # Calculate the potential energy for the i-th configuration
             r_raw_now, q_now = r[mask], q[mask]
             if cell is not None:
-                box_now = cell[i].detach()  # Get the box for the i-th configuration
+                box_now = cell[i] #.detach()  # Get the box for the i-th configuration
             
             # check if the box is periodic or not
             if cell is None or torch.linalg.det(box_now) < 1e-6:
@@ -58,6 +58,7 @@ class Ewald(nn.Module):
             else:
                 # the box is periodic, we use the reciprocal sum
                 pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now)
+                #pot = self.compute_potential_optimized(r_raw_now, q_now, box_now)
             results.append(pot)
 
         return torch.stack(results, dim=0).sum(dim=1)
@@ -95,6 +96,122 @@ class Ewald(nn.Module):
             pot += torch.sum(q ** 2) / (self.sigma * self.twopi**(3./2.))
     
         return pot * self.norm_factor
+
+    def compute_potential_optimized(self, r_raw, q, cell_now):
+        dtype = torch.complex64 if r_raw.dtype == torch.float32 else torch.complex128
+        device = r_raw.device
+
+        box = torch.tensor([cell_now[0, 0], cell_now[1, 1], cell_now[2, 2]])
+        #print('box', box)
+        volume = box[0] * box[1] * box[2]
+        r = r_raw / box
+
+        nk = (2*box / self.dl).int().tolist()
+        nk = [max(1, k) for k in nk]
+
+        n = r.shape[0]
+        eikx = torch.ones((n, nk[0] + 1), dtype=dtype, device=device)
+        eiky = torch.ones((n, 2 * nk[1] + 1), dtype=dtype, device=device)
+        eikz = torch.ones((n, 2 * nk[2] + 1), dtype=dtype, device=device)
+
+        eikx[:, 1] = torch.exp(1j * self.twopi * r[:, 0])
+        eiky[:, nk[1] + 1] = torch.exp(1j * self.twopi * r[:, 1])
+        eikz[:, nk[2] + 1] = torch.exp(1j * self.twopi * r[:, 2])
+        # Calculate remaining positive kx, ky, and kz terms by recursion
+        for k in range(2, nk[0] + 1):
+            eikx[:, k] = eikx[:, k - 1].clone() * eikx[:, 1].clone()
+        for k in range(2, nk[1] + 1):
+            eiky[:, nk[1] + k] = eiky[:, nk[1] + k - 1].clone() * eiky[:, nk[1] + 1].clone()
+        for k in range(2, nk[2] + 1):
+            eikz[:, nk[2] + k] = eikz[:, nk[2] + k - 1].clone() * eikz[:, nk[2] + 1].clone()
+
+        # Negative k values are complex conjugates of positive ones
+        for k in range(nk[1]):
+            eiky[:, k] = torch.conj(eiky[:, 2 * nk[1] - k])
+        for k in range(nk[2]):
+            eikz[:, k] = torch.conj(eikz[:, 2 * nk[2] - k])
+
+        kx = torch.arange(nk[0] + 1, device=device)
+        ky = torch.arange(-nk[1], nk[1] + 1, device=device)
+        kz = torch.arange(-nk[2], nk[2] + 1, device=device)
+
+        kx_term = (kx / box[0]) ** 2
+        ky_term = (ky / box[1]) ** 2
+        kz_term = (kz / box[2]) ** 2
+
+        kx_sq = kx_term.view(-1, 1, 1)
+        ky_sq = ky_term.view(1, -1, 1)
+        kz_sq = kz_term.view(1, 1, -1)
+
+        k_sq = self.twopi_sq * (kx_sq + ky_sq + kz_sq) # [nx, ny, nz]
+        nonzero_mask = k_sq > 1e-10
+        kfac = torch.zeros_like(k_sq)
+        kfac[nonzero_mask] = torch.exp(-self.sigma_sq_half * k_sq[nonzero_mask]) / k_sq[nonzero_mask]
+
+        #kfac = torch.exp(-self.sigma_sq_half * k_sq) / k_sq # [nx, ny, nz]
+
+        #mask = (k_sq <= self.k_sq_max) & (k_sq > 0)
+        #mask = (k_sq > 0)
+        #kfac[~mask] = 0
+        cutoff_weight = self.smooth_cutoff(k_sq, delta=10.0)
+        kfac = kfac * cutoff_weight
+
+        eikx_expanded = eikx.unsqueeze(2).unsqueeze(3) #[n_node, n_x, 1, 1]
+        eiky_expanded = eiky.unsqueeze(1).unsqueeze(3) #[n_node, 1, n_y, 1]
+        eikz_expanded = eikz.unsqueeze(1).unsqueeze(2) #[n_node, 1, 1, n_z]
+
+        factor = torch.ones_like(kx, dtype=r_raw.dtype, device=device)
+        factor[1:] = 2.0
+
+        if q.dim() == 1:
+            # [n_node, n_q, 1, 1, 1]
+            q_expanded = q.unsqueeze(1).unsqueeze(2).unsqueeze(3).unsqueeze(4)
+        elif q.dim() == 2:
+            q_expanded = q.unsqueeze(2).unsqueeze(3).unsqueeze(4)
+        else:
+            raise ValueError("q must be 1D or 2D tensor")
+        # q_expanded: [n_node, n_q, 1, 1, 1]
+        # eik: [n_node, n_x, n_y, n_z]
+        # sk: [n_q, n_x, n_y, n_z]
+        # kfac: [n_x, n_y, n_z]
+        eik = eikx_expanded * eiky_expanded * eikz_expanded
+        sk = torch.sum(q_expanded * eik.unsqueeze(1), dim=[0])
+        sk_conj = torch.conj(sk)
+        pot = (kfac.unsqueeze(0) * factor.view(1, -1, 1, 1) * torch.real(sk_conj * sk)).sum(dim=[1, 2, 3])
+
+        pot /= volume
+        assert cell_now.requires_grad
+        # Add tinfoil boundary correction for net charge (uniform background)
+        Q = torch.sum(q)
+        bg_energy = - (2 * torch.pi * Q**2) / (2 * volume)
+        pot += bg_energy
+
+        if self.remove_self_interaction:
+            pot -= torch.sum(q ** 2) / (self.sigma * self.twopi**(3./2.))
+
+        return pot.real * self.norm_factor
+
+    def smooth_cutoff(self, k_sq, delta=20.0):
+        """Smooth step function that is 1 below k_sq_max and fades to 0 over width delta."""
+        transition_start = self.k_sq_max
+        transition_end = self.k_sq_max + delta
+        mask1 = k_sq <= transition_start
+        mask2 = (k_sq > transition_start) & (k_sq < transition_end)
+
+        # scaled distance into transition region
+        x = (k_sq[mask2] - transition_start) / delta
+        taper = (1 - x**3)**3  # quintic spline
+
+        result = torch.zeros_like(k_sq)
+        result[mask1] = 1.0
+        result[mask2] = taper
+
+        # zero at k_sq == 0
+        mask0 = k_sq < 1e-6
+        result[mask0] = 0.0
+
+        #print(result)
+        return result
  
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now):
@@ -150,12 +267,17 @@ class Ewald(nn.Module):
         # Compute potential, (2π/volume)* sum(factors * kfac * |S(k)|^2)
         volume = torch.det(cell_now)
         pot = (factors * kfac * S_k_sq).sum() / volume
-        
+
+        # Add tinfoil boundary correction for net charge (uniform background)
+        #Q = torch.sum(q).detach()
+        #bg_energy = - (2 * torch.pi * Q**2) / (2 * volume)
+        #pot += bg_energy        
 
         # Remove self-interaction if applicable
         if self.remove_self_interaction:
             pot -= torch.sum(q**2) / (self.sigma * (2 * torch.pi)**1.5)
 
+        assert cell_now.requires_grad
         return pot.unsqueeze(0) * self.norm_factor
 
     def __repr__(self):
