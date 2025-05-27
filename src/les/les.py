@@ -5,7 +5,8 @@ from typing import Dict, Any, Union, Optional
 from .module import (
     Atomwise,
     Ewald,
-    BEC
+    PME
+    BEC,    
 )
 
 __all__ = ['Les']
@@ -43,6 +44,12 @@ class Les(nn.Module):
             dl=self.dl
             )
 
+        self.pme = PME(
+            dl=self.dl,
+            sigma=self.sigma,
+            use_pme=self.use_pme
+        )
+
         self.bec = BEC(
              remove_mean=self.remove_mean,
              epsilon_factor=self.epsilon_factor,
@@ -63,6 +70,7 @@ class Les(nn.Module):
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', True)
+        self.use_pme = les_arguments.get('use_pme', False)
 
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
@@ -106,7 +114,14 @@ class Les(nn.Module):
 
         # compute the long-range interactions
         if compute_energy:
-            E_lr = self.ewald(q=latent_charges,
+            if self.use_pme:
+                E_lr = self.pme(q=latent_charges,
+                              r=positions,
+                              cell=cell,
+                              batch=batch,
+                              )
+            else:
+                E_lr = self.ewald(q=latent_charges,
                               r=positions,
                               cell=cell,
                               batch=batch,
