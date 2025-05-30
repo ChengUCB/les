@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from typing import Optional
+import sys
 import torchpme
 
 __all__ = ['PME']
@@ -12,6 +13,7 @@ class PME(nn.Module):
                  remove_self_interaction: bool = True,
                  norm_factor: float = (torchpme.prefactors.eV_A * 2.0 * torch.pi),
                  use_pme: bool = False,  # Changed default to False
+                 apply_background_correction: bool = False,
                  ):
         super().__init__()
         self.dl = dl
@@ -26,6 +28,7 @@ class PME(nn.Module):
         self.k_sq_max = (self.twopi / self.dl) ** 2
         self.use_pme = use_pme
         self.calculator = None
+        self.apply_background_correction = apply_background_correction
 
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q]
@@ -71,19 +74,19 @@ class PME(nn.Module):
             self.calculator = torchpme.EwaldCalculator(
                 potential=potential,
                 lr_wavelength=self.dl,
+                apply_background_correction=self.apply_background_correction,
                 prefactor=torchpme.prefactors.eV_A
-            )
+            )       
             self.calculator = self.calculator.to(device=device, dtype=dtype)
         return self.calculator
 
-    def compute_potential_pme(self, r_raw: torch.Tensor, q: torch.Tensor, box: torch.Tensor, compute_field: bool = False) -> torch.Tensor:
+    def compute_potential_pme(self, r_raw: torch.Tensor, q: torch.Tensor, cell_now: torch.Tensor) -> torch.Tensor:
         """Compute potential energy using PME for periodic systems.
         
         Args:
             r_raw: Atomic positions [n_atoms, 3]
             q: Atomic charges [n_atoms, 1]
-            box: Simulation box [3] or [3, 3]
-            compute_field: Whether to compute electric field
+            cell_now: Simulation cell [3] or [3, 3]
             
         Returns:
             Potential energy tensor
@@ -91,20 +94,28 @@ class PME(nn.Module):
         device = r_raw.device
         dtype = r_raw.dtype
         
-        if box is None:
-            box = torch.zeros(3, device=device, dtype=dtype)
+        # Ensure q has the correct shape [n_atoms, 1]
+        if q.dim() == 1:
+            q = q.unsqueeze(1)
             
-        if box.dim() == 1:
-            box = torch.diag(box)
-        elif box.dim() == 2 and not (box.shape[0] == 3 and box.shape[1] == 3):
-            box = torch.diag(box)
+        # Ensure r_raw has the correct shape [n_atoms, 3]
+        if r_raw.dim() == 1:
+            r_raw = r_raw.unsqueeze(1)
+            
+        if cell_now is None:
+            cell_now = torch.zeros(3, device=device, dtype=dtype)
+            
+        if cell_now.dim() == 1:
+            cell_now = torch.diag(cell_now)
+        elif cell_now.dim() == 2 and not (cell_now.shape[0] == 3 and cell_now.shape[1] == 3):
+            cell_now = torch.diag(cell_now)
             
         self.calculator = self.setup_ewald_calculator(device=device, dtype=dtype)
         
         try:
             potentials = self.calculator(
                 charges=q,
-                cell=box,
+                cell=cell_now,
                 positions=r_raw,
                 neighbor_indices=torch.zeros((0, 2), dtype=torch.int64, device=device), # neighbor_indices is not used in PME
                 neighbor_distances=torch.zeros(0, dtype=dtype, device=device) # neighbor_distances is not used in PME
