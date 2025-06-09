@@ -158,7 +158,7 @@ class Ewald(nn.Module):
         if self.remove_self_interaction:
             pot -= torch.sum(q**2) / (self.sigma * (2*torch.pi)**1.5)
 
-        return pot.unsqueeze(0) * self.norm_factor
+        return pot * self.norm_factor
 
     def __repr__(self):
         return f"Ewald(dl={self.dl}, sigma={self.sigma}, remove_self_interaction={self.remove_self_interaction})"
