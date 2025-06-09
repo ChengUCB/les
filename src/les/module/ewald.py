@@ -136,13 +136,15 @@ class Ewald(nn.Module):
         # Compute structure factor S(k), Σq*e^(ikr)
         k_dot_r = torch.matmul(r_raw, kvec.T)  # [n, M]
         exp_ikr = torch.exp(1j * k_dot_r)
+        if q.dim() == 1:  
+            q = q.unsqueeze(1)
         S_k = torch.sum(q * exp_ikr, dim=0)  # [M]
 
          #for torchscript compatibility, to avoid dtype mismatch, only use real part
         cos_k_dot_r = torch.cos(k_dot_r)
         sin_k_dot_r = torch.sin(k_dot_r)
-        S_k_real = torch.sum(q * cos_k_dot_r, dim=0)  # [M]
-        S_k_imag = torch.sum(q * sin_k_dot_r, dim=0)  # [M]
+        S_k_real = (q.unsqueeze(2) * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
+        S_k_imag = (q.unsqueeze(2) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
         S_k_sq = S_k_real**2 + S_k_imag**2  # [M]
 
         # Compute kfac,  exp(-σ^2/2 k^2) / k^2 for exponent = 1
@@ -150,14 +152,13 @@ class Ewald(nn.Module):
         
         # Compute potential, (2π/volume)* sum(factors * kfac * |S(k)|^2)
         volume = torch.det(cell_now)
-        pot = (factors * kfac * S_k_sq).sum() / volume
-        
+        pot = (factors * kfac * S_k_sq).sum(dim=1) / volume
 
         # Remove self-interaction if applicable
         if self.remove_self_interaction:
-            pot -= torch.sum(q**2) / (self.sigma * (2 * torch.pi)**1.5)
+            pot -= torch.sum(q**2) / (self.sigma * (2*torch.pi)**1.5)
 
-        return pot.unsqueeze(0) * self.norm_factor
+        return pot * self.norm_factor
 
     def __repr__(self):
         return f"Ewald(dl={self.dl}, sigma={self.sigma}, remove_self_interaction={self.remove_self_interaction})"
