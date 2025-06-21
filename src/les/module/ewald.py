@@ -135,10 +135,8 @@ class Ewald(nn.Module):
 
         # Compute structure factor S(k), Σq*e^(ikr)
         k_dot_r = torch.matmul(r_raw, kvec.T)  # [n, M]
-        exp_ikr = torch.exp(1j * k_dot_r)
         if q.dim() == 1:  
             q = q.unsqueeze(1)
-        S_k = torch.sum(q * exp_ikr, dim=0)  # [M]
 
          #for torchscript compatibility, to avoid dtype mismatch, only use real part
         cos_k_dot_r = torch.cos(k_dot_r)
