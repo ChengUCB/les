@@ -5,7 +5,7 @@ from typing import Dict, Any, Union, Optional
 from .module import (
     Atomwise,
     Ewald,
-    PME
+    PME,
     BEC,    
 )
 
@@ -65,7 +65,7 @@ class Les(nn.Module):
         self.output_scaling_factor = les_arguments.get('output_scaling_factor', 0.1)
 
         self.sigma = les_arguments.get('sigma', 1.0)
-        self.dl = les_arguments.get('dl', 2.0)
+        self.dl = les_arguments.get('dl', 1.5)
 
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
