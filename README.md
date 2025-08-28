@@ -13,6 +13,12 @@ The Latent Ewald Summation (LES) library is a plug-in to add long-range interact
 
 Please refer to the `setup.py` file for installation instructions.
 
+`les` can be installed using `pip`
+```bash
+git clone https://github.com/ChengUCB/les.git
+pip install -e . 
+```
+
 ## Usage
 
 
