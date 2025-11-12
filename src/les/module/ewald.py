@@ -4,7 +4,7 @@ from itertools import product
 from typing import Dict, Optional
 import numpy as np
 
-__all__ = ['Ewald', 'Ewald_develop']
+__all__ = ['Ewald', 'Ewald_vectorized']
 
 class Ewald(nn.Module):
     def __init__(self,
@@ -162,12 +162,19 @@ class Ewald(nn.Module):
         return f"Ewald(dl={self.dl}, sigma={self.sigma}, remove_self_interaction={self.remove_self_interaction})"
 
 
-class Ewald_develop(nn.Module):
+
+
+
+
+
+class Ewald_vectorized(nn.Module):
     def __init__(self,
                  dl=2.0,  # grid resolution
                  sigma=1.0,  # width of the Gaussian on each atom
                  remove_self_interaction=True,
                  norm_factor=90.0474,
+                 is_periodic: bool = True,
+                 N_max: int = 10, # cell vector norm 20 divided by dl=2.0, increase if needed
                  ):
         super().__init__()
         self.dl = dl
@@ -181,6 +188,33 @@ class Ewald_develop(nn.Module):
         self.norm_factor = norm_factor
         self.k_sq_max = (self.twopi / self.dl) ** 2
 
+        self.is_periodic = is_periodic
+        self.N_max = N_max
+
+        ### fixed k-grid for non-periodic case, precompute ###
+        nvec_all = torch.stack(
+            torch.meshgrid(
+                torch.arange(-N_max, N_max + 1),
+                torch.arange(-N_max, N_max + 1),
+                torch.arange(-N_max, N_max + 1),
+                indexing="ij",
+            ),
+            dim=-1,
+        ).reshape(-1, 3) # [K,3], K = (2*N_max+1)^3
+        self.register_buffer('nvec_all', nvec_all)
+
+        non_zero = (nvec_all != 0)
+        has_non_zero = non_zero.any(dim=1)
+        first_non_zero_idx = torch.argmax(non_zero.to(torch.int), dim=1)
+        sign = torch.gather(nvec_all, 1, first_non_zero_idx.unsqueeze(1)).squeeze(1) # [K]
+        hemisphere_mask = (sign > 0) | (~has_non_zero) # [K]
+        is_origin = ~has_non_zero # [K]
+        factors = torch.where(is_origin, 1.0, 2.0)  # [K]
+
+        self.register_buffer('hemisphere_mask', hemisphere_mask) # [K] bool
+        self.register_buffer('factors', factors) # [K] float
+
+
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q]
                 r: torch.Tensor, # [n_atoms, 3]
@@ -193,21 +227,139 @@ class Ewald_develop(nn.Module):
 
         # Check the input dimension
         n, d = r.shape
-        assert d == 3, 'r dimension error'
-        assert n == q.size(0), 'q dimension error'
+        assert d == 3, 'r dimension error, r.shape[1] must be 3'
+        assert n == q.size(0), 'q dimension error, q.shape[0] must be n_atoms'
         if batch is None:
             batch = torch.zeros(n, dtype=torch.int64, device=r.device)
 
-        unique_batches = torch.unique(batch)  # Get unique batch indices
 
-        results = self.potential_full_ewald_batched(
-            pos=r,
-            q=q,
-            cell=cell,
-            batch=batch,
-        )
+        if not self.is_periodic: # non-periodic
+            assert cell is not None, 'fake cell needed for non-periodic case (ex. torch.zeros(n_batch, 3,3))'
+            results = self.compute_potential_realspace(r, q, cell, batch)
+        else: # periodic
+            results = self.compute_potential_triclinic(r, q, cell, batch)
 
         return results
+    
+
+
+    def compute_potential_realspace(self, r, q, cell, batch):
+        epsilon = 1e-6
+        r_ij = r.unsqueeze(0) - r.unsqueeze(1)
+        torch.diagonal(r_ij).add_(epsilon)
+        r_ij_norm = torch.norm(r_ij, dim=-1)
+
+        convergence_func_ij = torch.special.erf(r_ij_norm / self.sigma / (2.0 ** 0.5))
+        r_p_ij = 1.0 / (r_ij_norm)
+
+        N, n_q = q.shape
+
+        pot_ijq = (q.unsqueeze(0) * # [1, N, n_q]
+                q.unsqueeze(1) * # [N, 1, n_q]
+                r_p_ij.unsqueeze(2) * # [N, N, 1]
+                convergence_func_ij.unsqueeze(2) # [N, N, 1]
+                ) #-> [N, N, n_q]
+
+        same_batch = batch.unsqueeze(0) == batch.unsqueeze(1)  # [N, N]
+        offdiag = ~torch.eye(N, dtype=torch.bool, device=pot_ijq.device) # [N, N]
+        pair_mask = same_batch & offdiag # [N, N]
+
+        pot_ijq = pot_ijq * pair_mask.unsqueeze(2) # [N, N, n_q]
+
+        pot_per_atom_double = pot_ijq.sum(dim=(1,2)) # [N]
+        
+        # B = batch.max() + 1 # only problem for the torch.compile with fullgraph=True
+        B = cell.shape[0]
+        pot_per_batch_double = torch.zeros(B, device=pot_ijq.device, dtype=pot_per_atom_double.dtype) # [B]
+        pot_per_batch_double.scatter_add_(0, batch, pot_per_atom_double) # [B]
+
+        pot_per_batch = pot_per_batch_double / (self.twopi * 2.0) # [B]
+        norm_factor = 90.0474
+
+        if not self.remove_self_interaction:
+            q_sq_per_atom = (q ** 2).sum(dim=1)        # [N]
+            self_per_batch = torch.zeros(B, device=pot_ijq.device, dtype=q_sq_per_atom.dtype)
+            self_per_batch.scatter_add_(0, batch, q_sq_per_atom)
+            pot_per_batch = pot_per_batch + self_per_batch / (self.sigma * self.twopi ** (3.0 / 2.0))
+
+        return pot_per_batch * norm_factor
+    
+
+    def compute_potential_triclinic(self, r, q, cell, batch):
+
+        device = r.device
+
+        N, n_q = q.shape
+        B = cell.shape[0]
+        nvec = self.nvec_all.to(device=device,dtype=cell.dtype)  # [K, 3]
+        K = nvec.shape[0] # K = (2*N_max+1)^3
+
+        # --- 1. Reciprocal lattice G_b = 2π (M_b^{-1})^T ---
+        cell_inv = torch.linalg.inv(cell) # [B, 3, 3]
+        G = 2 * torch.pi * cell_inv.transpose(-2, -1)  # [B, 3, 3], G = 2π(M^{-1}).T
+
+        # --- 2. kvec[b, k, :] = nvec[k, :] @ G[b, :, :] ---
+        nvec_expanded = nvec.unsqueeze(0).expand(B, -1, -1)  # [B, K, 3]
+        kvec = torch.bmm(nvec_expanded, G)  # [B, K, 3]
+        k_sq = (kvec ** 2).sum(dim=-1)  # [B, K]
+
+        # --- 3. k cutoff + hemisphere mask ---
+        # Apply k-space cutoff and filter
+        # Determine symmetry factors (handle hemisphere to avoid double-counting)
+        # Include nvec if first non-zero component is positive
+        valid_kcut = (k_sq > 0) & (k_sq <= self.k_sq_max)  # [B, K]
+        hemi = self.hemisphere_mask.unsqueeze(0) # [1, K]
+        valid_mask = valid_kcut & hemi  # [B, K]
+
+        # --- 4. k-factor, exp(-σ^2/2 k^2) / k^2 for exponent = 1 ---
+        eps = 1e-12
+        kfac_full = torch.exp(-self.sigma_sq_half * k_sq) / (k_sq + eps) # [B, K]
+        factors = self.factors.to(device=kfac_full.device, dtype=kfac_full.dtype) # [K]
+
+        weight = kfac_full * factors.unsqueeze(0) # [B, K]
+        weight = weight * valid_mask.to(dtype=weight.dtype) # [B, K]
+
+        # --- 5. Structure factor S(k) = Σ_i q_i e^{i k·r_i} ---
+        kvec_for_atoms = kvec[batch] # [N, K, 3]
+        k_dot_r = (kvec_for_atoms * r.unsqueeze(1)).sum(dim=-1)  # [N, K]
+        #for torchscript compatibility, to avoid dtype mismatch, only use real part
+        cos_k_dot_r = torch.cos(k_dot_r) # [N, K]
+        sin_k_dot_r = torch.sin(k_dot_r) # [N, K]
+        # expand dimensions for broadcasting
+        cos_exp = cos_k_dot_r.unsqueeze(1)  # [N, 1, K]
+        sin_exp = sin_k_dot_r.unsqueeze(1)  # [N, 1, K]
+        q_exp = q.unsqueeze(2)               # [N, n_q, 1]
+
+        S_k_real_per_atom = q_exp * cos_exp  # [N, n_q, K]
+        S_k_imag_per_atom = q_exp * sin_exp  # [N, n_q, K]
+        # sum over atoms to get S_k
+        S_real = torch.zeros(B, n_q, K, device=device, dtype=r.dtype)  # [B, n_q, K]
+        S_imag = torch.zeros_like(S_real)  # [B, n_q, K]
+
+        index = batch.view(N, 1, 1).expand(-1, n_q, K)  # [N, n_q, K]
+        S_real = S_real.scatter_add_(0, index, S_k_real_per_atom)
+        S_imag = S_imag.scatter_add_(0, index, S_k_imag_per_atom)
+        S_k_sq = S_real.pow(2) + S_imag.pow(2)  # [B, n_q, K]
+
+
+        # --- 6. Compute potential, (2π/volume)* sum(factors * kfac * |S(k)|^2)---
+        w = weight.unsqueeze(1)  # [B, 1, K]
+        contrib = w * S_k_sq  # [B, n_q, K]
+
+        volume = torch.det(cell)  # [B]
+        pot_per_batch_per_q = contrib.sum(dim=-1) / volume.view(B, 1)  # [B, n_q]
+
+        # --- Remove self-interaction if applicable ---
+        if self.remove_self_interaction:
+            q_sq_per_atom = (q ** 2).sum(dim=1)  # [N]
+            self_per_batch = torch.zeros(B, device=device, dtype=r.dtype)  # [B]
+            self_per_batch.scatter_add_(0, batch, q_sq_per_atom.to(dtype=self_per_batch.dtype)) # [B]
+            self_term = self_per_batch / (self.sigma * (2*torch.pi)**1.5)  # [B]
+            pot_per_batch_per_q = pot_per_batch_per_q - self_term.view(B, 1) # [B, n_q]
+
+        pot_per_batch = pot_per_batch_per_q.sum(dim=1)  # [B]
+        return pot_per_batch * self.norm_factor  # [B]
+
 
  
     def potential_full_ewald_batched(
@@ -302,10 +454,14 @@ class Ewald_develop(nn.Module):
             nvec[:, 2] = n3_grid.flatten()
             
             # Compute k vectors in-place using matrix multiplication
-            torch.mm(nvec, G_b, out=kvec) # [grid_size, 3]
+            # torch.mm(nvec, G_b, out=kvec) # [grid_size, 3]
+            nvec_used = nvec.clone()
+            # kvec = torch.mm(nvec, G_b)  # [grid_size, 3]
+            kvec = torch.mm(nvec_used, G_b)  # [grid_size, 3]
             
             # Compute k_sq in-place
-            torch.sum(kvec ** 2, dim=1, out=k_sq) # [grid_size]
+            # torch.sum(kvec ** 2, dim=1, out=k_sq) # [grid_size]
+            k_sq = torch.sum(kvec ** 2, dim=1)  # [grid_size]
             
             # Apply filters using boolean indexing (creates views, not copies)
             valid_mask = (k_sq > 0) & (k_sq <= k_sq_max) # [grid_size] bool
@@ -341,8 +497,9 @@ class Ewald_develop(nn.Module):
             factors = torch.where(is_origin, 1.0, 2.0)  # [M']
             
             # Compute kfac in-place
-            kfac = torch.exp(-sigma_sq_half * k_sq_final) # [M']
-            kfac.div_(k_sq_final + epsilon) # avoid division by zero
+            kfac_exp = torch.exp(-sigma_sq_half * k_sq_final) # [M']
+            kfac = kfac_exp / (k_sq_final + epsilon)  # [M']
+            # kfac.div_(k_sq_final + epsilon) # avoid division by zero
             
             # Structure factor computation - reuse intermediate results
             k_dot_r = torch.mm(pos_b, kvec_final.T) # [n_atoms_b, M']
@@ -352,23 +509,29 @@ class Ewald_develop(nn.Module):
             sin_k_dot_r = torch.sin(k_dot_r) # [n_atoms_b, M']
             
             # Multiply q_b in-place and sum
-            cos_k_dot_r *= q_b#.unsqueeze(1) # [n_atoms_b, M']
-            sin_k_dot_r *= q_b#.unsqueeze(1) # [n_atoms_b, M']
-            
+            # cos_k_dot_r *= q_b#.unsqueeze(1) # [n_atoms_b, M']
+            # sin_k_dot_r *= q_b#.unsqueeze(1) # [n_atoms_b, M']
+            cos_k_dot_r = cos_k_dot_r * q_b  # [n_atoms_b, M']
+            sin_k_dot_r = sin_k_dot_r * q_b  # [n_atoms_b, M']
+
             S_k_real = torch.sum(cos_k_dot_r, dim=0) # [M']
             S_k_imag = torch.sum(sin_k_dot_r, dim=0) # [M']
             
             # Compute S_k_sq in-place
-            S_k_real.pow_(2) 
-            S_k_imag.pow_(2)
+            # S_k_real.pow_(2) 
+            # S_k_imag.pow_(2)
+            S_k_real = S_k_real ** 2
+            S_k_imag = S_k_imag ** 2
             S_k_sq = S_k_real + S_k_imag # [M']
             
             # Compute potential for this batch
             volume = torch.det(cell[b_idx])
             
             # Combine factors, kfac, and S_k_sq efficiently
-            factors *= kfac # [M']
-            factors *= S_k_sq # [M']
+            # factors *= kfac # [M']
+            # factors *= S_k_sq # [M']
+            factors = factors * kfac  # [M']
+            factors = factors * S_k_sq  # [M']
             pot_b = torch.sum(factors) / volume # scalar
             
             # Remove self-interaction
