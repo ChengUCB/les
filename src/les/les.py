@@ -5,6 +5,7 @@ from typing import Dict, Any, Union, Optional
 from .module import (
     Atomwise,
     Ewald,
+    Ewald_vectorized,
     BEC
 )
 
@@ -38,9 +39,11 @@ class Les(nn.Module):
             else _DummyAtomwise()
         )
 
-        self.ewald = Ewald(
+        self.ewald = Ewald_vectorized(
             sigma=self.sigma,
-            dl=self.dl
+            dl=self.dl,
+            is_periodic=self.is_periodic, # added argument to specify periodicity for torch.compile
+            N_max=10, # increase if needed (if cell vector norm > 10 * dl)
             )
 
         self.bec = BEC(
@@ -59,10 +62,12 @@ class Les(nn.Module):
 
         self.sigma = les_arguments.get('sigma', 1.0)
         self.dl = les_arguments.get('dl', 2.0)
+        self.is_periodic = les_arguments.get('is_periodic', True)
+        self.N_max = les_arguments.get('N_max', 10)
 
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
-        self.use_atomwise = les_arguments.get('use_atomwise', True)
+        self.use_atomwise = les_arguments.get('use_atomwise', False)
 
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
