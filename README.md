@@ -53,12 +53,19 @@ This project is licensed under the CC BY-NC 4.0 License.
   publisher={Nature Publishing Group UK London}
 }
 
-@article{kim2024learning,
-  title={Learning charges and long-range interactions from energies and forces},
-  author={Kim, Dongjin and King, Daniel S and Zhong, Peichen and Cheng, Bingqing},
-  journal={arXiv preprint arXiv:2412.15455},
-  year={2024}
+
+@article{King2025Machine,
+  title = {Machine Learning of Charges and Long-Range Interactions from Energies and Forces},
+  author = {King, Daniel S. and Kim, Dongjin and Zhong, Peichen and Cheng, Bingqing},
+  year = 2025,
+  journal = {Nature Communications},
+  volume = {16},
+  number = {1},
+  pages = {8763},
+  publisher = {Nature Publishing Group}
 }
+
+
 
 @article{zhong2025machine,
   title={Machine learning interatomic potential can infer electrical response},
