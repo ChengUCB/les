@@ -44,6 +44,9 @@ class Les(nn.Module):
             dl=self.dl,
             is_periodic=self.is_periodic, # added argument to specify periodicity for torch.compile
             N_max=10, # increase if needed (if cell vector norm > 10 * dl)
+            ) if self.vectorized else Ewald(
+            sigma=self.sigma,
+            dl=self.dl,
             )
 
         self.bec = BEC(
@@ -60,6 +63,7 @@ class Les(nn.Module):
         self.add_linear_nn = les_arguments.get('add_linear_nn', True)
         self.output_scaling_factor = les_arguments.get('output_scaling_factor', 0.1)
 
+        self.vectorized = les_arguments.get('vectorized', False)
         self.sigma = les_arguments.get('sigma', 1.0)
         self.dl = les_arguments.get('dl', 2.0)
         self.is_periodic = les_arguments.get('is_periodic', True)

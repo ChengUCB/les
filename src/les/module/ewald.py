@@ -231,6 +231,8 @@ class Ewald_vectorized(nn.Module):
         assert n == q.size(0), 'q dimension error, q.shape[0] must be n_atoms'
         if batch is None:
             batch = torch.zeros(n, dtype=torch.int64, device=r.device)
+        else:
+            batch = batch.to(device=r.device, dtype=torch.long)
 
 
         if not self.is_periodic: # non-periodic
