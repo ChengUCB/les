@@ -45,7 +45,7 @@ class Ewald(nn.Module):
         unique_batches = torch.unique(batch)  # Get unique batch indices
 
         results = []
-        for i in unique_batches:
+        for i in unique_batches.long():
             mask = batch == i  # Create a mask for the i-th configuration
             # Calculate the potential energy for the i-th configuration
             r_raw_now, q_now = r[mask], q[mask]
