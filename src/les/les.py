@@ -1,6 +1,7 @@
 import torch
 from torch import nn
 from typing import Dict, Any, Union, Optional
+import logging
 
 from .module import (
     Atomwise,
@@ -11,6 +12,7 @@ from .module import (
 
 __all__ = ['Les']
 
+logger = logging.getLogger(__name__)
 class Les(nn.Module):
 
     def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
@@ -39,16 +41,38 @@ class Les(nn.Module):
             else _DummyAtomwise()
         )
 
-        self.ewald = Ewald_vectorized(
-            sigma=self.sigma,
-            dl=self.dl,
-            is_periodic=self.is_periodic, # added argument to specify periodicity for torch.compile
-            N_max=10, # increase if needed (if cell vector norm > 10 * dl)
-            ) if self.vectorized else Ewald(
-            sigma=self.sigma,
-            dl=self.dl,
+        if self.is_periodic is not None:
+            self.ewald = Ewald_vectorized(
+                sigma=self.sigma,
+                dl=self.dl,
+                is_periodic=self.is_periodic,
+                N_max=self.N_max,
             )
-
+            if self.is_periodic:
+                logger.info(
+                    "LES: NOTE. Using vectorized Ewald (Reciprocal-space/Periodic). torch.compile compatible.\n"
+                    "We recommend using periodic datasets only. " \
+                    "For mixed datasets, please remove 'is_periodic' argument to use the legacy module.\n"
+                    "Make sure N_max * dl > cell norm for accuracy." \
+                    f"Current N_max: {self.N_max}, dl: {self.dl}"
+                )
+            else:
+                logger.info(
+                    "LES: NOTE. Using vectorized Ewald (Real-space/Non-Periodic). torch.compile compatible.\n"
+                    "We recommend using non-periodic datasets only. " \
+                    "For mixed datasets, please remove 'is_periodic' argument to use the legacy module."
+                )
+        else:
+            self.ewald = Ewald(
+                sigma=self.sigma,
+                dl=self.dl,
+            )
+            logger.info(
+                "LES: NOTE. This LES setting uses the legacy Ewald module.\n"
+                "This setting DOES NOT support torch.compile, but supports MIXED datasets (periodic & non-periodic).\n"
+                "If you want to use torch.compile, please set 'is_periodic=True' (or False).",
+            )
+            
         self.bec = BEC(
              remove_mean=self.remove_mean,
              epsilon_factor=self.epsilon_factor,
@@ -63,10 +87,10 @@ class Les(nn.Module):
         self.add_linear_nn = les_arguments.get('add_linear_nn', True)
         self.output_scaling_factor = les_arguments.get('output_scaling_factor', 0.1)
 
-        self.vectorized = les_arguments.get('vectorized', False)
         self.sigma = les_arguments.get('sigma', 1.0)
         self.dl = les_arguments.get('dl', 2.0)
-        self.is_periodic = les_arguments.get('is_periodic', True)
+
+        self.is_periodic = les_arguments.get('is_periodic', None)
         self.N_max = les_arguments.get('N_max', 10)
 
         self.remove_mean = les_arguments.get('remove_mean', True)
