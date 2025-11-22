@@ -201,7 +201,7 @@ class Ewald_vectorized(nn.Module):
             ),
             dim=-1,
         ).reshape(-1, 3) # [K,3], K = (2*N_max+1)^3
-        self.register_buffer('nvec_all', nvec_all)
+        self.register_buffer('nvec_all', nvec_all, persistent=False)
 
         non_zero = (nvec_all != 0)
         has_non_zero = non_zero.any(dim=1)
@@ -211,8 +211,8 @@ class Ewald_vectorized(nn.Module):
         is_origin = ~has_non_zero # [K]
         factors = torch.where(is_origin, 1.0, 2.0)  # [K]
 
-        self.register_buffer('hemisphere_mask', hemisphere_mask) # [K] bool
-        self.register_buffer('factors', factors) # [K] float
+        self.register_buffer('hemisphere_mask', hemisphere_mask, persistent=False) # [K] bool
+        self.register_buffer('factors', factors, persistent=False) # [K] float
 
 
     def forward(self,
