@@ -38,6 +38,10 @@ Here you can find MLIP packages **with LES implementation** presented in [*A Uni
 
 **Example training scripts** for these LES-augmented MLIPs can be found in [https://github.com/ChengUCB/les_fit].
 
+**Hyperparameters selection:** The default parameters (i.e. without setting anything) usually work well. 
+One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self_interaction=True' is the default and is the most robust choice.
+'remove_self_interaction=False' can sometimes yield a bit better training accuracy, but is less robust when training on finite systems and then extrapolate to periodic systems.
+
 ## License
 
 This project is licensed under the CC BY-NC 4.0 License.
