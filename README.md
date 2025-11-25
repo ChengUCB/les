@@ -35,6 +35,9 @@ Here you can find MLIP packages **with LES implementation** presented in [*A Uni
 | **Allegro** | [github.com/ChengUCB/NequIP-LES](https://github.com/ChengUCB/NequIP-LES) |
 | **MatGL**  | [github.com/ChengUCB/matgl](https://github.com/ChengUCB/matgl) |
 
+
+**Example training scripts** for these LES-augmented MLIPs can be found in [https://github.com/ChengUCB/les_fit].
+
 ## License
 
 This project is licensed under the CC BY-NC 4.0 License.
