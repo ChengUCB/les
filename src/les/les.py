@@ -40,7 +40,8 @@ class Les(nn.Module):
 
         self.ewald = Ewald(
             sigma=self.sigma,
-            dl=self.dl
+            dl=self.dl,
+            remove_self_interaction=self.remove_self_interaction,
             )
 
         self.bec = BEC(
@@ -59,6 +60,7 @@ class Les(nn.Module):
 
         self.sigma = les_arguments.get('sigma', 1.0)
         self.dl = les_arguments.get('dl', 2.0)
+        self.remove_self_interaction = les_arguments.get('remove_self_interaction', True)
 
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
