@@ -31,6 +31,7 @@ Here you can find MLIP packages **with LES implementation** presented in [*A Uni
 |---------|------|
 | **CACE**   | [github.com/BingqingCheng/cace](https://github.com/BingqingCheng/cace) |
 | **MACE**   | [github.com/ChengUCB/mace](https://github.com/ChengUCB/mace) |
+| **MACE(updated)**   | [github.com/ACEsuit/mace](https://github.com/ACEsuit/mace) |
 | **NequIP** | [github.com/ChengUCB/NequIP-LES](https://github.com/ChengUCB/NequIP-LES) |
 | **Allegro** | [github.com/ChengUCB/NequIP-LES](https://github.com/ChengUCB/NequIP-LES) |
 | **MatGL**  | [github.com/ChengUCB/matgl](https://github.com/ChengUCB/matgl) |
@@ -41,6 +42,9 @@ Here you can find MLIP packages **with LES implementation** presented in [*A Uni
 **Hyperparameters selection:** The default parameters (i.e. without setting anything) usually work well. 
 One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self_interaction=True' is the default and is the most robust choice.
 'remove_self_interaction=False' can sometimes yield a bit better training accuracy, but is less robust when training on finite systems and then extrapolate to periodic systems.
+
+## 📣 Update 
+[2025-10] The **`MACELES`** model has been implemented in the main [**MACE** repository](https://github.com/ACEsuit/mace). Example training and evaluation scripts are available in [les_fit](https://github.com/ChengUCB/les_fit/tree/main/MLIPs/MACE-LES-new).
 
 ## License
 
