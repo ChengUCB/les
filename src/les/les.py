@@ -5,7 +5,8 @@ from typing import Dict, Any, Union, Optional
 from .module import (
     Atomwise,
     Ewald,
-    BEC
+    BEC,
+    FixedCharges,
 )
 
 __all__ = ['Les']
@@ -38,6 +39,8 @@ class Les(nn.Module):
             else _DummyAtomwise()
         )
 
+        self.fixed_charges = FixedCharges()
+
         self.ewald = Ewald(
             sigma=self.sigma,
             dl=self.dl,
@@ -65,12 +68,14 @@ class Les(nn.Module):
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', True)
+        self.use_fixed_charges = les_arguments.get('use_fixed_charges', True)
 
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
+               atomic_numbers: Optional[torch.Tensor] = None, # [n_atoms, ]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
                compute_bec: bool = False,
@@ -105,6 +110,9 @@ class Les(nn.Module):
             latent_charges = self.atomwise(desc, batch)
         else:
             raise ValueError("Either desc or latent_charges must be provided")
+
+        if atomic_numbers is not None and self.use_fixed_charges:
+            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
 
         # compute the long-range interactions
         if compute_energy:
