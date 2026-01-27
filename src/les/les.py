@@ -42,35 +42,16 @@ class Les(nn.Module):
         )
 
         if self.is_periodic is not None:
-            self.ewald = Ewald_vectorized(
-                sigma=self.sigma,
-                dl=self.dl,
-                is_periodic=self.is_periodic,
-                N_max=self.N_max,
+            self.ewald = Ewald_vectorized( # torch.compile compatible
+                sigma=self.sigma, # default 1.0
+                dl=self.dl, # default 2.0
+                is_periodic=self.is_periodic, # True: periodic, False: non-periodic
+                N_max=self.N_max, # default 10, recommend N_max * dl > cell norm for accuracy."
             )
-            if self.is_periodic:
-                logger.info(
-                    "LES: NOTE. Using vectorized Ewald (Reciprocal-space/Periodic). torch.compile compatible.\n"
-                    "We recommend using periodic datasets only. " \
-                    "For mixed datasets, please remove 'is_periodic' argument to use the legacy module.\n"
-                    "Make sure N_max * dl > cell norm for accuracy." \
-                    f"Current N_max: {self.N_max}, dl: {self.dl}"
-                )
-            else:
-                logger.info(
-                    "LES: NOTE. Using vectorized Ewald (Real-space/Non-Periodic). torch.compile compatible.\n"
-                    "We recommend using non-periodic datasets only. " \
-                    "For mixed datasets, please remove 'is_periodic' argument to use the legacy module."
-                )
         else:
-            self.ewald = Ewald(
-                sigma=self.sigma,
-                dl=self.dl,
-            )
-            logger.info(
-                "LES: NOTE. This LES setting uses the legacy Ewald module.\n"
-                "This setting DOES NOT support torch.compile, but supports MIXED datasets (periodic & non-periodic).\n"
-                "If you want to use torch.compile, please set 'is_periodic=True' (or False).",
+            self.ewald = Ewald( # legacy module, not torch.compile compatible, supports mixed datasets
+                sigma=self.sigma, # default 1.0
+                dl=self.dl, # default 2.0
             )
             
         self.bec = BEC(
