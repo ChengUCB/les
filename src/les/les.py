@@ -1,7 +1,6 @@
 import torch
 from torch import nn
 from typing import Dict, Any, Union, Optional
-import logging
 
 from .module import (
     Atomwise,
@@ -12,7 +11,6 @@ from .module import (
 
 __all__ = ['Les']
 
-logger = logging.getLogger(__name__)
 class Les(nn.Module):
 
     def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
