@@ -25,18 +25,26 @@ We present **LES (Latent Ewald Summation)** ([https://github.com/ChengUCB/les](h
 
 Here we demonstrate its integration with MLIPs such as **MACE**, **NequIP**, **Allegro**, **CACE**, and **CHGNet**, and provide training scripts and trained models. In particular, we provide **MACELES-OFF** trained on the SPICE dataset. 
 
-Here you can find MLIP packages **with LES implementation** presented in [*A Universal Augmentation Framework for Long-Range Electrostatics in Machine Learning Interatomic Potentials*](https://arxiv.org/abs/2507.14302).
+Here you can find MLIP packages **with LES implementation** presented in [*A Universal Augmentation Framework for Long-Range Electrostatics in Machine Learning Interatomic Potentials*](https://pubs.acs.org/doi/10.1021/acs.jctc.5c01400).
 
 | Package | Link |
 |---------|------|
 | **CACE**   | [github.com/BingqingCheng/cace](https://github.com/BingqingCheng/cace) |
 | **MACE**   | [github.com/ChengUCB/mace](https://github.com/ChengUCB/mace) |
+| **MACE(updated)**   | [github.com/ACEsuit/mace](https://github.com/ACEsuit/mace) |
 | **NequIP** | [github.com/ChengUCB/NequIP-LES](https://github.com/ChengUCB/NequIP-LES) |
 | **Allegro** | [github.com/ChengUCB/NequIP-LES](https://github.com/ChengUCB/NequIP-LES) |
 | **MatGL**  | [github.com/ChengUCB/matgl](https://github.com/ChengUCB/matgl) |
 
 
 **Example training scripts** for these LES-augmented MLIPs can be found in [https://github.com/ChengUCB/les_fit].
+
+**Hyperparameters selection:** The default parameters (i.e. without setting anything) usually work well. 
+One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self_interaction=True' is the default and is the most robust choice.
+'remove_self_interaction=False' can sometimes yield a bit better training accuracy, but is less robust when training on finite systems and then extrapolate to periodic systems.
+
+## 📣 Update 
+[2025-10] The **`MACELES`** model has been implemented in the main [**MACE** repository](https://github.com/ACEsuit/mace). Example training and evaluation scripts are available in [les_fit](https://github.com/ChengUCB/les_fit/tree/main/MLIPs/MACE-LES-new).
 
 ## License
 
@@ -77,11 +85,13 @@ This project is licensed under the CC BY-NC 4.0 License.
   year={2025}
 }
 
-@article{Kim2025universal,
+@article{Kim2025Universalb,
   title = {A Universal Augmentation Framework for Long-Range Electrostatics in Machine Learning Interatomic Potentials},
-  author = {Kim, Dongjin and Wang, Xiaoyu and Zhong, Peichen and King, Daniel S. and Inizan, Theo Jaffrelot and Cheng, Bingqing},
-  journal={arXiv preprint arXiv:2507.14302},
-  year = {2025},
+  author = {Kim, Dongjin and Wang, Xiaoyu and Vargas, Santiago and Zhong, Peichen and King, Daniel S. and Inizan, Theo Jaffrelot and Cheng, Bingqing},
+  year = 2025,
+  journal = {Journal of Chemical Theory and Computation},
+  publisher = {American Chemical Society},
+  doi = {10.1021/acs.jctc.5c01400}
 }
 
 
