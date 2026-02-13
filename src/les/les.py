@@ -75,6 +75,7 @@ class Les(nn.Module):
                cell: torch.Tensor, # [batch_size, 3, 3]
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
+               latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
                atomic_numbers: Optional[torch.Tensor] = None, # [n_atoms, ]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
@@ -117,6 +118,7 @@ class Les(nn.Module):
         # compute the long-range interactions
         if compute_energy:
             E_lr = self.ewald(q=latent_charges,
+                              u=latent_dipoles,
                               r=positions,
                               cell=cell,
                               batch=batch,

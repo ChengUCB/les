@@ -30,6 +30,7 @@ class Ewald(nn.Module):
                 r: torch.Tensor, # [n_atoms, 3]
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
+                u: Optional[torch.Tensor] = None, # [n_atoms, 3]
                 ) -> torch.Tensor:
         
         if q.dim() == 1:
@@ -49,6 +50,8 @@ class Ewald(nn.Module):
             mask = batch == i  # Create a mask for the i-th configuration
             # Calculate the potential energy for the i-th configuration
             r_raw_now, q_now = r[mask], q[mask]
+            if u is not None:
+                u_now = u[mask]
             if cell is not None:
                 box_now = cell[i]  # Get the box for the i-th configuration
             
@@ -58,7 +61,7 @@ class Ewald(nn.Module):
                 pot = self.compute_potential_realspace(r_raw_now, q_now)
             else:
                 # the box is periodic, we use the reciprocal sum
-                pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now)
+                pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now, u_now)
             results.append(pot)
 
         return torch.stack(results, dim=0).sum(dim=1)
@@ -94,16 +97,16 @@ class Ewald(nn.Module):
         # because this realspace sum already removed self-interaction, we need to add it back if needed
         if self.remove_self_interaction == False:
             pot += torch.sum(q ** 2) / (self.sigma * self.twopi**(3./2.))
-    
+            if u is not None:
+                pot += torch.sum(u**2) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5)
         return pot * self.norm_factor
  
     # Triclinic box(could be orthorhombic)
-    def compute_potential_triclinic(self, r_raw, q, cell_now):
+    def compute_potential_triclinic(self, r_raw, q, cell_now, u):
         device = r_raw.device
 
         cell_inv = torch.linalg.inv(cell_now)
         G = 2 * torch.pi * cell_inv.T  # Reciprocal lattice vectors [3,3], G = 2π(M^{-1}).T
-        #print('G', G.type())
 
         # max Nk for each axis
         norms = torch.norm(cell_now, dim=1)
@@ -143,6 +146,20 @@ class Ewald(nn.Module):
         sin_k_dot_r = torch.sin(k_dot_r)
         S_k_real = (q.unsqueeze(2) * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
         S_k_imag = (q.unsqueeze(2) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
+
+        if u is not None:
+            #print('u', u.shape)
+            #print('k', kvec.shape)
+            uk = u @ kvec.T
+            #print('uk', uk.shape)
+            #print('sin_k_dot_r.unsqueeze(1)', sin_k_dot_r.unsqueeze(1).shape)
+            #print('q.unsqueeze(2)', q.unsqueeze(2).shape)
+            #print('S_k_real', S_k_real.shape)
+            S_k_real_u = (uk.unsqueeze(1) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
+            #print('mmm', S_k_real_u.shape)
+            S_k_real = S_k_real + S_k_real_u
+            S_k_imag_u = (uk.unsqueeze(1) * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
+            S_k_imag = S_k_imag - S_k_imag_u
         S_k_sq = S_k_real**2 + S_k_imag**2  # [M]
 
         # Compute kfac,  exp(-σ^2/2 k^2) / k^2 for exponent = 1
@@ -155,6 +172,8 @@ class Ewald(nn.Module):
         # Remove self-interaction if applicable
         if self.remove_self_interaction:
             pot -= torch.sum(q**2) / (self.sigma * (2*torch.pi)**1.5)
+            if u is not None:
+                pot -= torch.sum(u**2) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5)
 
         return pot * self.norm_factor
 
