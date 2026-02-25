@@ -31,6 +31,7 @@ class Ewald(nn.Module):
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, 3]
+                compute_field: bool = False
                 ) -> torch.Tensor:
         
         if q.dim() == 1:
@@ -52,46 +53,60 @@ class Ewald(nn.Module):
             r_raw_now, q_now = r[mask], q[mask]
             if u is not None:
                 u_now = u[mask]
+            else:
+                u_now = None
             if cell is not None:
                 box_now = cell[i]  # Get the box for the i-th configuration
             
             # check if the box is periodic or not
             if cell is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
-                pot = self.compute_potential_realspace(r_raw_now, q_now)
+                pot = self.compute_potential_realspace(r_raw_now, q_now, u_now, compute_field=compute_field)
             else:
                 # the box is periodic, we use the reciprocal sum
-                pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now, u_now)
+                pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now, u_now, compute_field=compute_field)
             results.append(pot)
 
         return torch.stack(results, dim=0).sum(dim=1)
 
     def compute_potential_realspace(self, r_raw, q, u=None, compute_field=False):
+
+        if q.dim() == 1:
+            # [n_node, n_q]
+            q = q.unsqueeze(1)
+
+        # Compute potential energy
+        n_node, n_q = q.shape
+
+        if u is not None:
+            if u.dim() == 2 and u.shape[1] == 3:
+                u = u.unsqueeze(1)
+            assert u.shape == (n_node, n_q, 3), 'u dimension error'
+
+        # mask out self terms cleanly (avoid eps-hacks for fields)
+        mask = ~torch.eye(n_node, dtype=torch.bool, device=r_raw.device)
+
         # Compute pairwise distances (norm of vector differences)
         # Add epsilon for safe Hessian compute
         epsilon = 1e-6
         r_ij = r_raw.unsqueeze(0) - r_raw.unsqueeze(1)
         torch.diagonal(r_ij).add_(epsilon)
         r_ij_norm = torch.norm(r_ij, dim=-1)
- 
-        # Error function scaling for long-range interactions
-        convergence_func_ij = torch.special.erf(r_ij_norm / self.sigma / (2.0 ** 0.5))
-   
         # Compute inverse distance
-        r_p_ij = 1.0 / (r_ij_norm)
+        rinv = 1.0 / r_ij_norm
+        rinv2 = rinv * rinv
+        rinv3 = rinv2 * rinv
 
-        if q.dim() == 1:
-            # [n_node, n_q]
-            q = q.unsqueeze(1)
-    
+        a = 1.0 / (self.sigma * (2.0 ** 0.5))          # 1/(sqrt(2)*sigma)
+        # Error function scaling for long-range interactions
+        convergence_func_ij = torch.special.erf(r_ij_norm * a)
+   
         # Compute potential energy
         n_node, n_q = q.shape
         # [1, n_node, n_q] * [n_node, 1, n_q] * [n_node, n_node, 1] * [n_node, n_node, 1]
-        pot = q.unsqueeze(0) * q.unsqueeze(1) * r_p_ij.unsqueeze(2) * convergence_func_ij.unsqueeze(2)
+        pot = q.unsqueeze(0) * q.unsqueeze(1) * rinv.unsqueeze(2) * convergence_func_ij.unsqueeze(2)
 
         #Exclude diagonal terms from energy
-        mask = ~torch.eye(pot.shape[0], device=pot.device).to(torch.bool).unsqueeze(-1)
-        mask = torch.vstack([mask.transpose(0,-1)]*pot.shape[-1]).transpose(0,-1)
         pot = pot[mask].sum().view(-1) / self.twopi / 2.0
 
         # because this realspace sum already removed self-interaction, we need to add it back if needed
@@ -104,10 +119,6 @@ class Ewald(nn.Module):
             return pot * self.norm_factor
 
         if compute_field:
-            rinv = r_p_ij
-            rinv2 = rinv * rinv
-            rinv3 = rinv2 * rinv
-            a = 1.0 / (self.sigma * (2.0 ** 0.5))          # 1/(sqrt(2)*sigma)
             gauss = torch.exp(-(a * r_ij_norm) ** 2)                # [n,n]
             pref = convergence_func_ij * rinv3 - (2.0 * a / (torch.pi ** 0.5)) * gauss * rinv2   # [n,n]
             pref.fill_diagonal_(0.0)
