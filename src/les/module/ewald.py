@@ -66,7 +66,7 @@ class Ewald(nn.Module):
 
         return torch.stack(results, dim=0).sum(dim=1)
 
-    def compute_potential_realspace(self, r_raw, q):
+    def compute_potential_realspace(self, r_raw, q, u=None, compute_field=False):
         # Compute pairwise distances (norm of vector differences)
         # Add epsilon for safe Hessian compute
         epsilon = 1e-6
@@ -99,10 +99,24 @@ class Ewald(nn.Module):
             pot += torch.sum(q ** 2) / (self.sigma * self.twopi**(3./2.))
             if u is not None:
                 pot += torch.sum(u**2) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5)
-        return pot * self.norm_factor
- 
+
+        if not compute_field:
+            return pot * self.norm_factor
+
+        if compute_field:
+            rinv = r_p_ij
+            rinv2 = rinv * rinv
+            rinv3 = rinv2 * rinv
+            a = 1.0 / (self.sigma * (2.0 ** 0.5))          # 1/(sqrt(2)*sigma)
+            gauss = torch.exp(-(a * r_ij_norm) ** 2)                # [n,n]
+            pref = convergence_func_ij * rinv3 - (2.0 * a / (torch.pi ** 0.5)) * gauss * rinv2   # [n,n]
+            pref.fill_diagonal_(0.0)
+
+            q_field = torch.sum(q.unsqueeze(1) * r_ij * pref.unsqueeze(2), dim=0) / self.twopi
+            return pot * self.norm_factor, q_field * self.norm_factor
+
     # Triclinic box(could be orthorhombic)
-    def compute_potential_triclinic(self, r_raw, q, cell_now, u):
+    def compute_potential_triclinic(self, r_raw, q, cell_now, u=None, compute_field=False):
         device = r_raw.device
 
         cell_inv = torch.linalg.inv(cell_now)
@@ -148,15 +162,8 @@ class Ewald(nn.Module):
         S_k_imag = (q.unsqueeze(2) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
 
         if u is not None:
-            #print('u', u.shape)
-            #print('k', kvec.shape)
             uk = u @ kvec.T
-            #print('uk', uk.shape)
-            #print('sin_k_dot_r.unsqueeze(1)', sin_k_dot_r.unsqueeze(1).shape)
-            #print('q.unsqueeze(2)', q.unsqueeze(2).shape)
-            #print('S_k_real', S_k_real.shape)
             S_k_real_u = (uk.unsqueeze(1) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
-            #print('mmm', S_k_real_u.shape)
             S_k_real = S_k_real + S_k_real_u
             S_k_imag_u = (uk.unsqueeze(1) * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
             S_k_imag = S_k_imag - S_k_imag_u
@@ -175,7 +182,24 @@ class Ewald(nn.Module):
             if u is not None:
                 pot -= torch.sum(u**2) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5)
 
-        return pot * self.norm_factor
+        if not compute_field:
+            return pot * self.norm_factor
+
+        if compute_field:
+            S_k = S_k_real + 1j * S_k_imag
+            exp_ikr = cos_k_dot_r + 1j * sin_k_dot_r
+            sk_field = 2 * kfac * torch.conj(S_k)                               # [n_q, M]
+            q_field = torch.real(
+                      -1j *
+                      factors[None, :, None]      # (1, M, 1)
+                      * exp_ikr[:, :, None]       # (N, M, 1)
+                      * kvec[None, :, :]          # (1, M, 3)
+                      * sk_field[:, :, None]      # (1, M, 1)
+                      )
+            q_field = q_field.sum(dim=1) / volume
+            return pot * self.norm_factor, q_field * self.norm_factor
+
+
 
     def __repr__(self):
         return f"Ewald(dl={self.dl}, sigma={self.sigma}, remove_self_interaction={self.remove_self_interaction})"
