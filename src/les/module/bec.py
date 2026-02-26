@@ -88,7 +88,10 @@ class BEC(nn.Module):
         result = result.real
         if u is not None:
             P_u = torch.stack(all_P_u, dim=0)
-            result = result + grad(y=P_u, x=r)
+            result_u = grad(y=P_u, x=r)
+            print(result.shape)
+            print(torch.stack([result, result_u], dim=1).shape)
+            return torch.stack([result, result_u], dim=1)
         return result
  
     def compute_pol_pbc(self, r_now, q_now, box_now):
