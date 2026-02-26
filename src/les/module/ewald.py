@@ -75,7 +75,6 @@ class Ewald(nn.Module):
             # [n_node, n_q]
             q = q.unsqueeze(1)
 
-        # Compute potential energy
         n_node, n_q = q.shape
 
         if u is not None:
@@ -217,6 +216,13 @@ class Ewald(nn.Module):
         k_dot_r = torch.matmul(r_raw, kvec.T)  # [n, M]
         if q.dim() == 1:  
             q = q.unsqueeze(1)
+        # Compute potential energy
+        n_node, n_q = q.shape
+
+        if u is not None:
+            if u.dim() == 2 and u.shape[1] == 3:
+                u = u.unsqueeze(1)
+            assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
          #for torchscript compatibility, to avoid dtype mismatch, only use real part
         cos_k_dot_r = torch.cos(k_dot_r) # [n, M]
@@ -224,11 +230,11 @@ class Ewald(nn.Module):
         S_k_real = (q.unsqueeze(2) * cos_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
         S_k_imag = (q.unsqueeze(2) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
         if u is not None:
-            uk = u @ kvec.T # [n, 3] @ [M, 3] -> [n_node, M]
-            # [n, 1, 3] * [n, 1, M] -> [1, M]
-            S_k_real_u = (uk.unsqueeze(1) * sin_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
+            uk = u @ kvec.T # [n, n_q, 3] @ [M, 3] -> [n_node, n_q, M]
+            # [n, n_q, 3] * [n, 1, M] -> [n_q, M]
+            S_k_real_u = (uk * sin_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
             S_k_real = S_k_real + S_k_real_u
-            S_k_imag_u = (uk.unsqueeze(1) * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
+            S_k_imag_u = (uk * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
             S_k_imag = S_k_imag - S_k_imag_u
         S_k_sq = S_k_real**2 + S_k_imag**2  # [M]
 
@@ -264,7 +270,7 @@ class Ewald(nn.Module):
             if self.remove_self_interaction and u is not None:
                 a = 1.0 / (self.sigma * (2.0 ** 0.5))
                 c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi  # [1/length^3] / (2π)
-                q_field = q_field - c_self * u
+                q_field = q_field - c_self * u.sum(dim=1)
 
             return pot * self.norm_factor, q_field * self.norm_factor
 
