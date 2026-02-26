@@ -144,7 +144,7 @@ class Ewald(nn.Module):
             f_uu = f_uu_1 + f_uu_2
             pot_uu = -0.5 * torch.einsum('iqc,ijcd,jqd->', u, f_uu, u) / self.twopi
             pot += pot_uu
-            print(pot_qu * self.norm_factor , pot_uu * self.norm_factor)
+            #print(pot_qu * self.norm_factor , pot_uu * self.norm_factor)
 
         # because this realspace sum already removed self-interaction, we need to add it back if needed
         if self.remove_self_interaction == False:
@@ -156,16 +156,21 @@ class Ewald(nn.Module):
             return pot * self.norm_factor
 
         if compute_field:
-            q_field = torch.sum(q.unsqueeze(1) * - f_qu, dim=0) / self.twopi
-            print('q_field' ,q_field * self.norm_factor)
+            # Field from charges: E_q = sum_j q_j * (-grad_i phi_ij)
+            # f_qu is -s1 * r_ij, which is grad_j phi_ij. 
+            # So -grad_i phi_ij is actually +f_qu.
+            E_q = torch.einsum('ijc,jq->ic', f_qu, q) / self.twopi
+
             if u is not None:
-                # field on i from dipoles at j: E_i = - sum_j ( f_uu[i,j] @ u_j )
-                u_summed = u[:,0,:] # [n_node, 3]
-                E_u = torch.einsum('id,ijcd->jc', u_summed, f_uu) / self.twopi
-                #print('E_u', E_u.shape)
-                #print('q_field', q_field.shape)
-                print('E_u', E_u * self.norm_factor)
-                q_field = q_field + E_u
+                # Sum over n_q components of dipoles to get net dipole at each site
+                u_net = u.sum(dim=1) # [n_node, 3]
+                # Field from dipoles: E_u_i = sum_j (T_ij * u_j)
+                # f_uu is the Hessian [n, n, 3, 3]
+                E_u = - torch.einsum('ijcd,jd->ic', f_uu, u_net) / self.twopi  # [n,3] 
+                q_field = E_q + E_u
+            else:
+                q_field = E_q
+                
             return pot * self.norm_factor, q_field * self.norm_factor
 
     # Triclinic box(could be orthorhombic)
