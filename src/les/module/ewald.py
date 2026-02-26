@@ -111,7 +111,7 @@ class Ewald(nn.Module):
         # [1, n_node, n_q] * [n_node, 1, n_q] * [n_node, n_node, 1] 
         pot = q.unsqueeze(0) * q.unsqueeze(1) * f_qq.unsqueeze(2) # [n_node, n_node, n_q]
         #Exclude diagonal terms from energy
-        pot = pot[mask_j_less_i].sum() / self.twopi
+        pot = pot[mask_j_less_i].sum().view(-1) / self.twopi
 
         # charge-dipole kernel
         gauss = torch.zeros_like(r_ij_norm)
