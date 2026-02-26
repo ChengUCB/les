@@ -129,6 +129,7 @@ class Les(nn.Module):
         # compute the BEC
         if compute_bec:
             bec = self.bec(q=latent_charges,
+                           u=latent_dipoles,
                            r=positions,
                            cell=cell,
                            batch=batch,

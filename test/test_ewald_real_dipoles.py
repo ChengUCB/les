@@ -5,7 +5,7 @@ torch.set_default_dtype(torch.float32)
 import les
 from les.module import Ewald
 
-ep = Ewald(dl=1.0,
+ep = Ewald(dl=2.0,
           sigma=2
           )
 

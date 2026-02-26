@@ -34,9 +34,6 @@ class Ewald(nn.Module):
                 compute_field: bool = False
                 ) -> torch.Tensor:
         
-        if q.dim() == 1:
-            q = q.unsqueeze(1)
-
         # Check the input dimension
         n, d = r.shape
         assert d == 3, 'r dimension error'

@@ -20,12 +20,21 @@ class BEC(nn.Module):
                 q: torch.Tensor,  # [n_atoms, n_q]
                 r: torch.Tensor, # [n_atoms, 3]
                 cell: torch.Tensor, # [batch_size, 3, 3]
+                u: Optional[torch.Tensor] = None, # [n_atoms, 3]
                 batch: Optional[torch.Tensor] = None,
                 output_index: Optional[int] = None, # 0, 1, 2 to select only one component
                 ) -> torch.Tensor:
 
         if q.dim() == 1:
+            # [n_node, n_q]
             q = q.unsqueeze(1)
+
+        n_node, n_q = q.shape
+
+        if u is not None:
+            if u.dim() == 2 and u.shape[1] == 3:
+                u = u.unsqueeze(1)
+            assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
         # Check the input dimension
         n, d = r.shape
@@ -38,10 +47,12 @@ class BEC(nn.Module):
 
         # compute the polarization for each batch
         all_P = []
+        all_P_u = []
         all_phases = [] 
         for i in unique_batches:
             mask = batch == i  # Create a mask for the i-th configuration
             r_now, q_now = r[mask], q[mask]
+
             if self.remove_mean:
                 q_now = q_now - torch.mean(q_now, dim=0, keepdim=True)
     
@@ -61,15 +72,24 @@ class BEC(nn.Module):
 
             all_P.append(polarization * self.normalization_factor)
             all_phases.append(phase)
+
+            if u is not None:
+                u_now = u[mask]
+                polarization_u = u_now.sum((0,1))
+                all_P_u.append(polarization_u * self.normalization_factor)
+
         P = torch.stack(all_P, dim=0)
         phases = torch.cat(all_phases, dim=0)
 
         # take the gradient of the polarization w.r.t. the positions to get the complex BEC
         bec_complex = grad(y=P, x=r)
-   
         # dephase
         result = bec_complex * phases.unsqueeze(1).conj()
-        return result.real
+        result = result.real
+        if u is not None:
+            P_u = torch.stack(all_P_u, dim=0)
+            result = result + grad(y=P_u, x=r)
+        return result
  
     def compute_pol_pbc(self, r_now, q_now, box_now):
         r_frac = torch.matmul(r_now, torch.linalg.inv(box_now))
