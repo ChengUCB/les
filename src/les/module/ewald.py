@@ -168,6 +168,7 @@ class Ewald(nn.Module):
                 # f_uu is the Hessian [n, n, 3, 3]
                 E_u = - torch.einsum('ijcd,jd->ic', f_uu, u_net) / self.twopi  # [n,3] 
                 q_field = E_q + E_u
+                #print("E_u", E_u * self.norm_factor)
             else:
                 q_field = E_q
                 
@@ -214,14 +215,14 @@ class Ewald(nn.Module):
             q = q.unsqueeze(1)
 
          #for torchscript compatibility, to avoid dtype mismatch, only use real part
-        cos_k_dot_r = torch.cos(k_dot_r)
+        cos_k_dot_r = torch.cos(k_dot_r) # [n, M]
         sin_k_dot_r = torch.sin(k_dot_r)
-        S_k_real = (q.unsqueeze(2) * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
+        S_k_real = (q.unsqueeze(2) * cos_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
         S_k_imag = (q.unsqueeze(2) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
-
         if u is not None:
-            uk = u @ kvec.T
-            S_k_real_u = (uk.unsqueeze(1) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
+            uk = u @ kvec.T # [n, 3] @ [M, 3] -> [n_node, M]
+            # [n, 1, 3] * [n, 1, M] -> [1, M]
+            S_k_real_u = (uk.unsqueeze(1) * sin_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
             S_k_real = S_k_real + S_k_real_u
             S_k_imag_u = (uk.unsqueeze(1) * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
             S_k_imag = S_k_imag - S_k_imag_u
