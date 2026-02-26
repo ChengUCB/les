@@ -29,13 +29,17 @@ print(ew_1)
 print('reciprocal', field_1)
 # Numerical Calculation (Force / charge)
 # field_numeric = - dPot / dr_i / q_i
-grad_r = torch.autograd.grad(ew_1[0], r)[0]
-field_numeric = -grad_r / q.view(-1, 1)
-print(field_numeric)
+#grad_r = torch.autograd.grad(ew_1[0], r)[0]
+#field_numeric = -grad_r / q.view(-1, 1)
+#print(field_numeric)
 ew_1_s, field_1_s = ep.compute_potential_realspace(r, q, u=u, compute_field=True)
 print(ew_1_s)
 print('real', field_1_s)
 
-grad_r = torch.autograd.grad(ew_1_s, r)[0]
-field_numeric = -grad_r / q.view(-1, 1)
-print(field_numeric)
+#grad_r = torch.autograd.grad(ew_1_s, r)[0]
+#field_numeric = -grad_r / q.view(-1, 1)
+#print(field_numeric)
+
+print('dif in E_field')
+print(field_1-field_1_s)
+

@@ -166,9 +166,13 @@ class Ewald(nn.Module):
                 u_net = u.sum(dim=1) # [n_node, 3]
                 # Field from dipoles: E_u_i = sum_j (T_ij * u_j)
                 # f_uu is the Hessian [n, n, 3, 3]
-                E_u = - torch.einsum('ijcd,jd->ic', f_uu, u_net) / self.twopi  # [n,3] 
+                E_u = - torch.einsum('ijcd,jd->ic', f_uu, u_net) / self.twopi  # [n,3]
+                if self.remove_self_interaction == False: 
+                    c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi  # [1/length^3] / (2π)
+                    E_u = E_u + c_self * u_net
                 q_field = E_q + E_u
                 #print("E_u", E_u * self.norm_factor)
+                
             else:
                 q_field = E_q
                 
@@ -256,6 +260,12 @@ class Ewald(nn.Module):
                       * sk_field[:, :, None]      # (1, M, 1)
                       )
             q_field = q_field.sum(dim=1) / volume
+
+            if self.remove_self_interaction == True:
+                a = 1.0 / (self.sigma * (2.0 ** 0.5))
+                c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi  # [1/length^3] / (2π)
+                q_field = q_field - c_self * u
+
             return pot * self.norm_factor, q_field * self.norm_factor
 
 
