@@ -261,7 +261,7 @@ class Ewald(nn.Module):
                       )
             q_field = q_field.sum(dim=1) / volume
 
-            if self.remove_self_interaction == True:
+            if self.remove_self_interaction and u is not None:
                 a = 1.0 / (self.sigma * (2.0 ** 0.5))
                 c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi  # [1/length^3] / (2π)
                 q_field = q_field - c_self * u
