@@ -89,9 +89,9 @@ class Ewald(nn.Module):
         # Compute pairwise distances (norm of vector differences)
         # Add epsilon for safe Hessian compute
         epsilon = 1e-6
-        r_ij = r_raw.unsqueeze(0) - r_raw.unsqueeze(1)
+        r_ij = r_raw.unsqueeze(0) - r_raw.unsqueeze(1) # [n_node, n_node, 3]
         torch.diagonal(r_ij).add_(epsilon)
-        r_ij_norm = torch.norm(r_ij, dim=-1)
+        r_ij_norm = torch.norm(r_ij, dim=-1) # [n_node, n_node]
         # Compute inverse distance
         rinv = 1.0 / r_ij_norm
         rinv2 = rinv * rinv
@@ -100,14 +100,31 @@ class Ewald(nn.Module):
         a = 1.0 / (self.sigma * (2.0 ** 0.5))          # 1/(sqrt(2)*sigma)
         # Error function scaling for long-range interactions
         convergence_func_ij = torch.special.erf(r_ij_norm * a)
-   
-        # Compute potential energy
-        n_node, n_q = q.shape
-        # [1, n_node, n_q] * [n_node, 1, n_q] * [n_node, n_node, 1] * [n_node, n_node, 1]
-        pot = q.unsqueeze(0) * q.unsqueeze(1) * rinv.unsqueeze(2) * convergence_func_ij.unsqueeze(2)
 
+        # charge-charge kernel
+        f_qq = convergence_func_ij * rinv # [n_node, n_node]
+        # Compute potential energy
+        # [1, n_node, n_q] * [n_node, 1, n_q] * [n_node, n_node, 1] 
+        pot = q.unsqueeze(0) * q.unsqueeze(1) * f_qq.unsqueeze(2) # [n_node, n_node, n_q]
         #Exclude diagonal terms from energy
         pot = pot[mask].sum().view(-1) / self.twopi / 2.0
+
+        # charge-dipole kernel
+        gauss = torch.exp(-(a * r_ij_norm) ** 2)
+        s1 = convergence_func_ij * rinv3 - (2.0 * a / (torch.pi ** 0.5)) * gauss * rinv2 # [n_node, n_node]
+        s1.fill_diagonal_(0.0)
+        f_qu = - s1.unsqueeze(2) * r_ij # [n_node, n_node, 3]
+        if u is not None:
+            # [1, n_node, n_q, 3] * [n_node, n_node, 1, 3] -> [n_node, n_node, n_q]
+            u_dot_f_du = (u.unsqueeze(0) * f_qu.unsqueeze(2)).sum(dim=-1) # [n_node, n_node, n_q]
+            # [1, n_node, n_q] * [n_node, n_node, n_q] -> [n_node, n_node, n_q]
+            pot_qu = q.unsqueeze(0) * u_dot_f_du # [n_node, n_node, n_q]
+            pot += pot_qu[mask].sum().view(-1) / self.twopi / 2.0
+
+        # dipole-dipole kernel
+        s2 = s1 - (4./3./torch.pi**0.5)  * a**3 * gauss  # [n_node, n_node]
+        s2.fill_diagonal_(0.0)
+        
 
         # because this realspace sum already removed self-interaction, we need to add it back if needed
         if self.remove_self_interaction == False:
@@ -119,11 +136,7 @@ class Ewald(nn.Module):
             return pot * self.norm_factor
 
         if compute_field:
-            gauss = torch.exp(-(a * r_ij_norm) ** 2)                # [n,n]
-            pref = convergence_func_ij * rinv3 - (2.0 * a / (torch.pi ** 0.5)) * gauss * rinv2   # [n,n]
-            pref.fill_diagonal_(0.0)
-
-            q_field = torch.sum(q.unsqueeze(1) * r_ij * pref.unsqueeze(2), dim=0) / self.twopi
+            q_field = torch.sum(q.unsqueeze(1) * - f_qu, dim=0) / self.twopi
             return pot * self.norm_factor, q_field * self.norm_factor
 
     # Triclinic box(could be orthorhombic)
