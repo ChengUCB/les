@@ -151,7 +151,7 @@ class Ewald(nn.Module):
             if u is not None:
                 # Field from dipoles: E_u_j = sum_i (T_ij * u_i)
                 # f_uu is the Hessian [n, n, 3, 3]
-                E_u = torch.einsum('ijcd,iqd->jc', f_uu, u) / self.twopi  # [n,3]
+                E_u = torch.einsum('ijcd,iqc->jd', f_uu, u) / self.twopi  # [n,3]
                 if self.remove_self_interaction == False: 
                     c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi  # [1/length^3] / (2π)
                     E_u = E_u - c_self * u_net
@@ -214,19 +214,31 @@ class Ewald(nn.Module):
                 u = u.unsqueeze(1)
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
-         #for torchscript compatibility, to avoid dtype mismatch, only use real part
+        """
+        # for torchscript compatibility, to avoid dtype mismatch, only use real part
         cos_k_dot_r = torch.cos(k_dot_r) # [n, M]
         sin_k_dot_r = torch.sin(k_dot_r)
         S_k_real = (q.unsqueeze(2) * cos_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
         S_k_imag = (q.unsqueeze(2) * sin_k_dot_r.unsqueeze(1)).sum(dim=0)
         if u is not None:
-            uk = - u @ kvec.T # [n, n_q, 3] @ [M, 3] -> [n_node, n_q, M]
+            uk = u @ kvec.T # [n, n_q, 3] @ [M, 3] -> [n_node, n_q, M]
             # [n, n_q, 3] * [n, 1, M] -> [n_q, M]
-            S_k_real_u = (uk * sin_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
+            S_k_real_u = - (uk * sin_k_dot_r.unsqueeze(1)).sum(dim=0) # [n_q, M]
             S_k_real = S_k_real + S_k_real_u
             S_k_imag_u = (uk * cos_k_dot_r.unsqueeze(1)).sum(dim=0)
-            S_k_imag = S_k_imag - S_k_imag_u
+            S_k_imag = S_k_imag + S_k_imag_u
         S_k_sq = S_k_real**2 + S_k_imag**2  # [M]
+        """
+
+        exp_ikr = torch.exp(1j * k_dot_r)
+        S_k = (q.unsqueeze(2) * exp_ikr.unsqueeze(1)).sum(dim=0) #[n_q, M]
+
+        if u is not None:
+            uk = u @ kvec.T
+            S_k_u = 1j * (uk * exp_ikr.unsqueeze(1)).sum(dim=0) #[n_q, M]
+            S_k = S_k + S_k_u
+
+        S_k_sq = torch.real(S_k * torch.conj(S_k))
 
         # Compute kfac,  exp(-σ^2/2 k^2) / k^2 for exponent = 1
         kfac = torch.exp(-self.sigma_sq_half * k_sq) / k_sq
@@ -242,8 +254,8 @@ class Ewald(nn.Module):
                 pot -= torch.sum(u**2) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5)
 
         if compute_field or alpha is not None:
-            S_k = S_k_real + 1j * S_k_imag
-            exp_ikr = cos_k_dot_r + 1j * sin_k_dot_r
+            #S_k = S_k_real + 1j * S_k_imag
+            #exp_ikr = cos_k_dot_r + 1j * sin_k_dot_r
             sk_field = 2 * kfac * torch.conj(S_k)                               # [n_q, M]
             q_field = torch.real(
                       -1j *
