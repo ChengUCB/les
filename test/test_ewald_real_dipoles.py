@@ -6,7 +6,8 @@ import les
 from les.module import Ewald
 
 ep = Ewald(dl=2.0,
-          sigma=2
+          sigma=2,
+          remove_self_interaction=False,
           )
 
 # set the same random seed for reproducibility
@@ -42,4 +43,5 @@ print('real', field_1_s)
 
 print('dif in E_field')
 print(field_1-field_1_s)
+print((field_1-field_1_s)/u)
 

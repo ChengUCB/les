@@ -6,7 +6,8 @@ import les
 from les.module import Ewald
 
 ep = Ewald(dl=1.5,
-          sigma=1
+          sigma=1,
+          remove_self_interaction=False,
           )
 
 # set the same random seed for reproducibility
