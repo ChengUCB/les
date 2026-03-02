@@ -26,11 +26,11 @@ class Ewald(nn.Module):
         self.k_sq_max = (self.twopi / self.dl) ** 2
 
     def forward(self,
-                q: torch.Tensor,  # [n_atoms, n_q]
+                q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
                 r: torch.Tensor, # [n_atoms, 3]
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
-                u: Optional[torch.Tensor] = None, # [n_atoms, 3]
+                u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
                 alpha: Optional[torch.Tensor] = None, # [n_atoms, 3]
                 compute_field: bool = False
                 ) -> torch.Tensor:
@@ -70,6 +70,7 @@ class Ewald(nn.Module):
                 pot = self.compute_potential_triclinic(r_raw_now, q_now, box_now, u=u_now, alpha=alpha_now, compute_field=compute_field)
             results.append(pot)
 
+        # here we sum over all n_q dimensions
         return torch.stack(results, dim=0).sum(dim=1)
 
     def compute_potential_realspace(self, r_raw, q, u=None, alpha=None, compute_field=False):
@@ -110,8 +111,8 @@ class Ewald(nn.Module):
         # Compute potential energy
         # [1, n_node, n_q] * [n_node, 1, n_q] * [n_node, n_node, 1] 
         pot_qq = q.unsqueeze(0) * q.unsqueeze(1) * f_qq.unsqueeze(2) # [n_node, n_node, n_q]
-        # Exclude diagonal terms from energy
-        pot = 0.5 * pot_qq[mask_off].sum().view(-1)
+        # diagonal terms are zero
+        pot = 0.5 * pot_qq.sum(dim=(0,1)) # [n_q]
 
         if compute_field or u is not None or alpha is not None:
             # charge-dipole kernel
@@ -124,8 +125,8 @@ class Ewald(nn.Module):
             # print((f_qu + f_qu.transpose(0,1))[mask].abs().max()) should be zero
         if u is not None:
             # - E * u
-            pot_qu = - torch.einsum('iq,ijc,jqc->', q, f_qu, u)
-            pot += pot_qu
+            pot_qu = - torch.einsum('iq,ijc,jqc->q', q, f_qu, u)
+            pot = pot + pot_qu
 
             # dipole-dipole kernel for f(r)=erf(ar)/r
             s2 = 3.0 * erf * rinv3 \
@@ -138,31 +139,31 @@ class Ewald(nn.Module):
             f_uu_2 = - s1[:, :, None, None] * I3 
             # f_uu[i,j,...] is for the electric field at r_j due to u_i at r_i  
             f_uu = (f_uu_1 + f_uu_2) * norm_const
-            pot_uu = -0.5 * torch.einsum('iqc,ijcd,jqd->', u, f_uu, u)
+            pot_uu = -0.5 * torch.einsum('iqc,ijcd,jqd->q', u, f_uu, u)
             pot += pot_uu
 
         # because this realspace sum already removed self-interaction, we need to add it back if needed
         if self.remove_self_interaction == False:
-            pot += torch.sum(q ** 2) / (self.sigma * self.twopi**(3./2.)) * self.norm_factor
+            pot += (q ** 2).sum(dim=0) / (self.sigma * self.twopi**(3./2.)) * self.norm_factor
             if u is not None:
-                pot += torch.sum(u**2) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5) * self.norm_factor
+                pot += (u**2).sum(dim=(0,2)) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5) * self.norm_factor
 
         if compute_field or alpha is not None:
-            E_q = torch.einsum('iq,ijc->jc', q, f_qu)
+            E_q = torch.einsum('iq,ijc->jqc', q, f_qu)
 
             if u is not None:
                 # Field from dipoles: E_u_j = sum_i (T_ij * u_i)
                 # f_uu is the Hessian [n, n, 3, 3]
-                E_u = torch.einsum('ijcd,iqc->jd', f_uu, u)  # [n,3]
+                E_u = torch.einsum('ijcd,iqc->jqd', f_uu, u)  # [n, n_q, 3]
                 if self.remove_self_interaction == False: 
                     c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor # [1/length^3] / (2π)
-                    E_u = E_u - c_self * u.sum(dim=1)
+                    E_u = E_u - c_self * u
                 q_field = E_q + E_u
             else:
                 q_field = E_q
 
             if alpha is not None:
-                pot_induced = - 0.5 * ((q_field ** 2).sum(dim=1) * alpha).sum(dim=0)
+                pot_induced = - 0.5 * ((q_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
                 pot = pot + pot_induced
 
         if compute_field:
@@ -234,47 +235,47 @@ class Ewald(nn.Module):
         """
 
         exp_ikr = torch.exp(1j * k_dot_r)
-        S_k = (q.unsqueeze(2) * exp_ikr.unsqueeze(1)).sum(dim=0) #[n_q, M]
+        S_k = (q.unsqueeze(2) * exp_ikr.unsqueeze(1)).sum(dim=0) # [n_q, M]
 
         if u is not None:
             uk = u @ kvec.T
-            S_k_u = 1j * (uk * exp_ikr.unsqueeze(1)).sum(dim=0) #[n_q, M]
+            S_k_u = 1j * (uk * exp_ikr.unsqueeze(1)).sum(dim=0) # [n_q, M]
             S_k = S_k + S_k_u
 
-        S_k_sq = torch.real(S_k * torch.conj(S_k))
+        S_k_sq = torch.real(S_k * torch.conj(S_k)) # [n_q, M]
 
         # Compute kfac,  exp(-σ^2/2 k^2) / k^2 for exponent = 1
         kfac = torch.exp(-self.sigma_sq_half * k_sq) / k_sq
         
         # Compute potential, (2π/volume)* sum(factors * kfac * |S(k)|^2)
         volume = torch.det(cell_now)
-        pot = (factors * kfac * S_k_sq).sum(dim=1) / volume * self.norm_factor
+        pot = (factors * kfac * S_k_sq).sum(dim=1) / volume * self.norm_factor # [n_q]
 
         # Remove self-interaction if applicable
         if self.remove_self_interaction:
-            pot -= torch.sum(q**2) / (self.sigma * (2*torch.pi)**1.5) * self.norm_factor
+            pot -= torch.sum(q**2, dim=0) / (self.sigma * (2*torch.pi)**1.5) * self.norm_factor
             if u is not None:
-                pot -= torch.sum(u**2) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5) * self.norm_factor
+                pot -= torch.sum(u**2, dim=(0,2)) / ( 3 * self.sigma**3. * (2*torch.pi)**1.5) * self.norm_factor
 
         if compute_field or alpha is not None:
             #S_k = S_k_real + 1j * S_k_imag
             #exp_ikr = cos_k_dot_r + 1j * sin_k_dot_r
-            sk_field = 2 * kfac * torch.conj(S_k)                               # [n_q, M]
+            sk_field = 2 * kfac * torch.conj(S_k)   # [n_q, M]
             q_field = torch.real(
                       -1j *
-                      factors[None, :, None]      # (1, M, 1)
-                      * exp_ikr[:, :, None]       # (N, M, 1)
-                      * kvec[None, :, :]          # (1, M, 3)
-                      * sk_field[:, :, None]      # (1, M, 1)
-                      )
-            q_field = q_field.sum(dim=1) / volume * self.norm_factor # [n, 3]
+                      factors[None, None, :, None]      # (1, 1,  M, 1)
+                      * exp_ikr[:, None, :, None]       # (n, 1,  M, 1)
+                      * kvec[None, None, :, :]          # (1, 1,  M, 3)
+                      * sk_field[None, :, :, None]      # (1, n_q, M, 1)
+                      ).sum(dim=2)
+            q_field = q_field / volume * self.norm_factor # [n, n_q, 3]
 
             if self.remove_self_interaction and u is not None:
                 a = 1.0 / (self.sigma * (2.0 ** 0.5))
-                c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor # [1/length^3] / (2π)
-                q_field = q_field + c_self * u.sum(dim=1)
+                c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor
+                q_field = q_field + c_self * u
             if alpha is not None:
-                pot_induced = - 0.5 * ((q_field ** 2).sum(dim=1) * alpha).sum(dim=0)
+                pot_induced = - 0.5 * ((q_field ** 2).sum(dim=2) * alpha).sum(dim=0)
                 pot = pot + pot_induced
 
         if compute_field:
