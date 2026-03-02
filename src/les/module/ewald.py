@@ -31,7 +31,8 @@ class Ewald(nn.Module):
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
-                alpha: Optional[torch.Tensor] = None, # [n_atoms, 3]
+                kappa: Optional[torch.Tensor] = None, # [n_atoms]
+                alpha: Optional[torch.Tensor] = None, # [n_atoms]
                 compute_field: bool = False
                 ) -> torch.Tensor:
         
@@ -50,10 +51,17 @@ class Ewald(nn.Module):
             mask = batch == i  # Create a mask for the i-th configuration
             # Calculate the potential energy for the i-th configuration
             r_raw_now, q_now = r[mask], q[mask]
+
             if u is not None:
                 u_now = u[mask]
             else:
                 u_now = None
+
+            if kappa is not None:
+                kappa_now = kappa[mask]
+            else:
+                kappa_now = None
+
             if alpha is not None:
                 alpha_now = alpha[mask]
             else:
@@ -66,13 +74,17 @@ class Ewald(nn.Module):
             if cell is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
                 result = self.compute_potential_realspace(r_raw_now, q_now, 
-                                                          u=u_now, alpha=alpha_now, 
+                                                          u=u_now, 
+                                                          kappa=kappa_now,
+                                                          alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
                 result = self.compute_potential_triclinic(r_raw_now, q_now, box_now, 
-                                                          u=u_now, alpha=alpha_now, 
+                                                          u=u_now, 
+                                                          kappa=kappa_now,
+                                                          alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
             results.append(result['pot'])
@@ -82,7 +94,7 @@ class Ewald(nn.Module):
         #return torch.stack(results, dim=0).sum(dim=1), torch.cat(u_induced_results)
         return torch.cat(results), torch.cat(u_induced_results)
 
-    def compute_potential_realspace(self, r_raw, q, u=None, alpha=None, compute_field=False):
+    def compute_potential_realspace(self, r_raw, q, u=None, kappa=None, alpha=None, compute_field=False):
 
         # this is 1/(4pi epsilon_0)
         norm_const = self.norm_factor / self.twopi
@@ -202,7 +214,7 @@ class Ewald(nn.Module):
         return output
 
     # Triclinic box(could be orthorhombic)
-    def compute_potential_triclinic(self, r_raw, q, cell_now, u=None, alpha=None, compute_field=False):
+    def compute_potential_triclinic(self, r_raw, q, cell_now, u=None, kappa=None, alpha=None, compute_field=False):
         device = r_raw.device
         if q.dim() == 1:
             one_dim_input = True

@@ -76,7 +76,8 @@ class Les(nn.Module):
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
                latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
-               latent_alphas: Optional[torch.Tensor] = None, # [n_atoms, 3]
+               latent_kappas: Optional[torch.Tensor] = None, # [n_atoms, 3]
+               latent_alphas: Optional[torch.Tensor] = None, # [n_atoms, ]
                atomic_numbers: Optional[torch.Tensor] = None, # [n_atoms, ]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
@@ -120,6 +121,7 @@ class Les(nn.Module):
         if compute_energy:
             E_lr, u_induced = self.ewald(q=latent_charges,
                               u=latent_dipoles,
+                              kappa=latent_kappas,
                               alpha=latent_alphas,
                               r=positions,
                               cell=cell,
