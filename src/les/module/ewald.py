@@ -82,6 +82,7 @@ class Ewald(nn.Module):
             # [n_node, n_q]
             q = q.unsqueeze(1)
         n_node, n_q = q.shape
+        device = r_raw.device
 
         if u is not None:
             if u.dim() == 2 and u.shape[1] == 3:
@@ -89,7 +90,7 @@ class Ewald(nn.Module):
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
         # mask out self terms cleanly (avoid eps-hacks for fields)
-        mask_off = ~torch.eye(n_node, dtype=torch.bool, device=r_raw.device)
+        mask_off = ~torch.eye(n_node, dtype=torch.bool, device=device)
 
         # r_ij[i,j] = r_raw[0,j] - r_raw[i,0] = r_j - r_i
         r_ij = r_raw.unsqueeze(0) - r_raw.unsqueeze(1) # [n_node, n_node, 3]
@@ -135,7 +136,7 @@ class Ewald(nn.Module):
             rhat = r_ij * rinv[..., None]
             outer = rhat[..., :, None] * rhat[..., None, :] # [n,n,3,3]
             f_uu_1 = s2[:, :, None, None] * outer # ij\alpha\beta = [node, node, 3 , 3] 
-            I3 = torch.eye(3, device=r_raw.device, dtype=r_raw.dtype)[None, None, :, :]      # [1,1,3,3]
+            I3 = torch.eye(3, device=device, dtype=r_raw.dtype)[None, None, :, :]      # [1,1,3,3]
             f_uu_2 = - s1[:, :, None, None] * I3 
             # f_uu[i,j,...] is for the electric field at r_j due to u_i at r_i  
             f_uu = (f_uu_1 + f_uu_2) * norm_const
@@ -174,6 +175,15 @@ class Ewald(nn.Module):
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, u=None, alpha=None, compute_field=False):
         device = r_raw.device
+        if q.dim() == 1:
+            q = q.unsqueeze(1)
+        # Compute potential energy
+        n_node, n_q = q.shape
+
+        if u is not None:
+            if u.dim() == 2 and u.shape[1] == 3:
+                u = u.unsqueeze(1)
+            assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
         cell_inv = torch.linalg.inv(cell_now)
         G = 2 * torch.pi * cell_inv.T  # Reciprocal lattice vectors [3,3], G = 2π(M^{-1}).T
@@ -208,16 +218,8 @@ class Ewald(nn.Module):
 
         # Compute structure factor S(k), Σq*e^(ikr)
         k_dot_r = torch.matmul(r_raw, kvec.T)  # [n, M]
-        if q.dim() == 1:  
-            q = q.unsqueeze(1)
-        # Compute potential energy
-        n_node, n_q = q.shape
-
-        if u is not None:
-            if u.dim() == 2 and u.shape[1] == 3:
-                u = u.unsqueeze(1)
-            assert u.shape == (n_node, n_q, 3), 'u dimension error'
-
+        exp_ikr = torch.exp(1j * k_dot_r)
+        S_k = (q.unsqueeze(2) * exp_ikr.unsqueeze(1)).sum(dim=0) # [n_q, M]
         """
         # for torchscript compatibility, to avoid dtype mismatch, only use real part
         cos_k_dot_r = torch.cos(k_dot_r) # [n, M]
@@ -233,15 +235,10 @@ class Ewald(nn.Module):
             S_k_imag = S_k_imag + S_k_imag_u
         S_k_sq = S_k_real**2 + S_k_imag**2  # [M]
         """
-
-        exp_ikr = torch.exp(1j * k_dot_r)
-        S_k = (q.unsqueeze(2) * exp_ikr.unsqueeze(1)).sum(dim=0) # [n_q, M]
-
         if u is not None:
             uk = u @ kvec.T
             S_k_u = 1j * (uk * exp_ikr.unsqueeze(1)).sum(dim=0) # [n_q, M]
             S_k = S_k + S_k_u
-
         S_k_sq = torch.real(S_k * torch.conj(S_k)) # [n_q, M]
 
         # Compute kfac,  exp(-σ^2/2 k^2) / k^2 for exponent = 1
@@ -274,6 +271,7 @@ class Ewald(nn.Module):
                 a = 1.0 / (self.sigma * (2.0 ** 0.5))
                 c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor
                 q_field = q_field + c_self * u
+
             if alpha is not None:
                 pot_induced = - 0.5 * ((q_field ** 2).sum(dim=2) * alpha).sum(dim=0)
                 pot = pot + pot_induced
