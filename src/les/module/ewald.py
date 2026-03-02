@@ -65,28 +65,32 @@ class Ewald(nn.Module):
             # check if the box is periodic or not
             if cell is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
-                pot, u_induced = self.compute_potential_realspace(r_raw_now, q_now, u=u_now, alpha=alpha_now, compute_field=compute_field)
+                result = self.compute_potential_realspace(r_raw_now, q_now, u=u_now, alpha=alpha_now, compute_field=compute_field)
             else:
                 # the box is periodic, we use the reciprocal sum
-                pot, u_induced = self.compute_potential_triclinic(r_raw_now, q_now, box_now, u=u_now, alpha=alpha_now, compute_field=compute_field)
-            results.append(pot)
-            u_induced_results.append(u_induced)
+                result = self.compute_potential_triclinic(r_raw_now, q_now, box_now, u=u_now, alpha=alpha_now, compute_field=compute_field)
+            results.append(result['pot'])
+            u_induced_results.append(result['u_induced'])
 
         # here we sum over energy contributions from all n_q dimensions
-        return torch.stack(results, dim=0).sum(dim=1), torch.cat(u_induced_results)
+        #return torch.stack(results, dim=0).sum(dim=1), torch.cat(u_induced_results)
+        return torch.cat(results), torch.cat(u_induced_results)
 
     def compute_potential_realspace(self, r_raw, q, u=None, alpha=None, compute_field=False):
 
         # this is 1/(4pi epsilon_0)
         norm_const = self.norm_factor / self.twopi
 
-
         if q.dim() == 1:
-            # [n_node, n_q]
+            one_dim_input = True
             q = q.unsqueeze(1)
+        else:
+            one_dim_input = False
         n_node, n_q = q.shape
         device = r_raw.device
 
+        e_phi, e_field = None, None
+        q_induced = torch.zeros((n_node, n_q), device=device, dtype=r_raw.dtype)
         u_induced = torch.zeros((n_node, n_q, 3), device=device, dtype=r_raw.dtype)
 
         if u is not None:
@@ -173,20 +177,27 @@ class Ewald(nn.Module):
                 pot = pot + pot_induced
                 u_induced = e_field * alpha[:, None, None]
 
-        if u_induced.shape[1] == 1: u_induced = u_induced.squeeze(dim=1)
-        if compute_field:
-            return pot, u_induced, e_field
-        if not compute_field:
-            return pot, u_induced
+        output = {
+                 'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
+                 'q_induced': q_induced.squeeze(dim=1) if one_dim_input else q_induced,
+                 'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
+                 'phi': e_phi,
+                 'field': e_field,
+                 }
+        return output
 
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, u=None, alpha=None, compute_field=False):
         device = r_raw.device
         if q.dim() == 1:
+            one_dim_input = True
             q = q.unsqueeze(1)
-        # Compute potential energy
+        else:
+            one_dim_input = False
         n_node, n_q = q.shape
 
+        e_phi, e_field = None, None
+        q_induced = torch.zeros((n_node, n_q), device=device, dtype=r_raw.dtype)
         u_induced = torch.zeros((n_node, n_q, 3), device=device, dtype=r_raw.dtype)
 
         if u is not None:
@@ -286,11 +297,14 @@ class Ewald(nn.Module):
                 pot = pot + pot_induced                
                 u_induced = e_field * alpha[:, None, None]
 
-        if u_induced.shape[1] == 1: u_induced = u_induced.squeeze(dim=1)
-        if compute_field:
-            return pot, u_induced, e_field
-        if not compute_field:
-            return pot, u_induced
+        output = {
+                 'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
+                 'q_induced': q_induced.squeeze(dim=1) if one_dim_input else q_induced,
+                 'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
+                 'phi': e_phi,
+                 'field': e_field,
+                 }
+        return output
 
     def __repr__(self):
         return f"Ewald(dl={self.dl}, sigma={self.sigma}, remove_self_interaction={self.remove_self_interaction})"
