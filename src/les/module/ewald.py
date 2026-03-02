@@ -284,7 +284,7 @@ class Ewald(nn.Module):
             if alpha is not None:
                 pot_induced = - 0.5 * ((q_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
                 pot = pot + pot_induced                
-                u_induced = q_field * alpha[:, None, None] / self.norm_factor
+                u_induced = q_field * alpha[:, None, None]
 
         if u_induced.shape[1] == 1: u_induced = u_induced.squeeze(dim=1)
         if compute_field:
