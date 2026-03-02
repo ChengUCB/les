@@ -164,18 +164,18 @@ class Ewald(nn.Module):
                 if self.remove_self_interaction == False: 
                     c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor # [1/length^3] / (2π)
                     E_u = E_u - c_self * u
-                q_field = E_q + E_u
+                e_field = E_q + E_u
             else:
-                q_field = E_q
+                e_field = E_q
 
             if alpha is not None:
-                pot_induced = - 0.5 * ((q_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
+                pot_induced = - 0.5 * ((e_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
                 pot = pot + pot_induced
-                u_induced = q_field * alpha[:, None, None]
+                u_induced = e_field * alpha[:, None, None]
 
         if u_induced.shape[1] == 1: u_induced = u_induced.squeeze(dim=1)
         if compute_field:
-            return pot, u_induced, q_field
+            return pot, u_induced, e_field
         if not compute_field:
             return pot, u_induced
 
@@ -267,28 +267,28 @@ class Ewald(nn.Module):
             #S_k = S_k_real + 1j * S_k_imag
             #exp_ikr = cos_k_dot_r + 1j * sin_k_dot_r
             sk_field = 2 * kfac * torch.conj(S_k)   # [n_q, M]
-            q_field = torch.real(
+            e_field = torch.real(
                       -1j *
                       factors[None, None, :, None]      # (1, 1,  M, 1)
                       * exp_ikr[:, None, :, None]       # (n, 1,  M, 1)
                       * kvec[None, None, :, :]          # (1, 1,  M, 3)
                       * sk_field[None, :, :, None]      # (1, n_q, M, 1)
                       ).sum(dim=2)
-            q_field = q_field / volume * self.norm_factor # [n, n_q, 3]
+            e_field = e_field / volume * self.norm_factor # [n, n_q, 3]
 
             if self.remove_self_interaction and u is not None:
                 a = 1.0 / (self.sigma * (2.0 ** 0.5))
                 c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor
-                q_field = q_field + c_self * u
+                e_field = e_field + c_self * u
 
             if alpha is not None:
-                pot_induced = - 0.5 * ((q_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
+                pot_induced = - 0.5 * ((e_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
                 pot = pot + pot_induced                
-                u_induced = q_field * alpha[:, None, None]
+                u_induced = e_field * alpha[:, None, None]
 
         if u_induced.shape[1] == 1: u_induced = u_induced.squeeze(dim=1)
         if compute_field:
-            return pot, u_induced, q_field
+            return pot, u_induced, e_field
         if not compute_field:
             return pot, u_induced
 
