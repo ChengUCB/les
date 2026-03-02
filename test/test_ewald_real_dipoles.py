@@ -24,8 +24,10 @@ u -= torch.mean(u, 0)
 
 box = torch.tensor([[40.0, 0.0, 0.0], [ 0.0, 40.0, 0.0], [0.0, 0.0, 40.0]], dtype=torch.float32)  # Box dimensions
 
+kappa = torch.ones(10) * 0.5
+alpha = torch.ones(10) * 0.5
 
-result = ep.compute_potential_triclinic(r, q, torch.tensor(box),  u=u, compute_field=True, compute_potential=True)
+result = ep.compute_potential_triclinic(r, q, torch.tensor(box),  u=u, kappa=kappa, alpha=alpha, compute_field=True, compute_potential=True)
 ew_1, phi_1, field_1 = result['pot'], result['phi'], result['field']
 print(ew_1)
 print('reciprocal', field_1)
@@ -35,7 +37,7 @@ print('reciprocal', field_1)
 #field_numeric = -grad_r / q.view(-1, 1)
 #print(field_numeric)
 
-result_r = ep.compute_potential_realspace(r, q, u=u, compute_field=True)
+result_r = ep.compute_potential_realspace(r, q, u=u, kappa=kappa, alpha=alpha, compute_field=True)
 ew_1_s, phi_1_s, field_1_s = result_r['pot'], result_r['phi'], result_r['field']
 print(ew_1_s)
 print('real', field_1_s)
@@ -46,3 +48,11 @@ print('real', field_1_s)
 print("compare electric potential")
 print(phi_1)
 print(phi_1_s)
+
+print("compare induced q")
+print(result['q_induced'])
+print(result_r['q_induced'])
+
+print("compare induced u")
+print(result['u_induced'])
+print(result_r['u_induced'])
