@@ -119,7 +119,7 @@ class Les(nn.Module):
 
         # compute the long-range interactions
         if compute_energy:
-            E_lr, u_induced = self.ewald(q=latent_charges,
+            E_lr, q_induced, u_induced = self.ewald(q=latent_charges,
                               u=latent_dipoles,
                               kappa=latent_kappas,
                               alpha=latent_alphas,
@@ -135,7 +135,9 @@ class Les(nn.Module):
                 latent_dipoles = latent_dipoles + u_induced
             else:
                 latent_dipoles = u_induced
-        
+       
+        if latent_kappas is not None: 
+            latent_charges = latent_charges + q_induced
 
         # compute the BEC
         if compute_bec:

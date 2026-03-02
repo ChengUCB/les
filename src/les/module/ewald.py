@@ -46,6 +46,7 @@ class Ewald(nn.Module):
         unique_batches = torch.unique(batch)  # Get unique batch indices
 
         results = []
+        q_induced_results = []
         u_induced_results = []
         for i in unique_batches:
             mask = batch == i  # Create a mask for the i-th configuration
@@ -88,11 +89,10 @@ class Ewald(nn.Module):
                                                           compute_field=compute_field
                                                           )
             results.append(result['pot'])
+            q_induced_results.append(result['q_induced'])
             u_induced_results.append(result['u_induced'])
 
-        # here we sum over energy contributions from all n_q dimensions
-        #return torch.stack(results, dim=0).sum(dim=1), torch.cat(u_induced_results)
-        return torch.cat(results), torch.cat(u_induced_results)
+        return torch.cat(results), torch.cat(q_induced_results), torch.cat(u_induced_results)
 
     def compute_potential_realspace(self, r_raw, q, u=None, kappa=None, alpha=None, compute_field=False):
 
@@ -182,10 +182,15 @@ class Ewald(nn.Module):
             if u is not None:
                 pot += (u**2).sum(dim=(0,2)) / ( 3 * self.sigma**3. * self.twopi**1.5) * self.norm_factor
 
+        # for computing induced charges
+        if kappa is not None:
+            pot_induced = - 0.5 * (e_phi ** 2 * kappa[:, None]).sum(dim=0) # [n_q]
+            pot = pot + pot_induced
+            q_induced = - kappa * e_phi # [n, n_q]
 
         # for computing electric field
         if compute_field or alpha is not None:
-            E_q = torch.einsum('iq,ijc->jqc', q, f_qu)
+            e_field = torch.einsum('iq,ijc->jqc', q, f_qu) # [n, n_q, 3]
 
             if u is not None:
                 # Field from dipoles: E_u_j = sum_i (T_ij * u_i)
@@ -194,15 +199,13 @@ class Ewald(nn.Module):
                 if not self.remove_self_interaction: 
                     c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) * norm_const
                     E_u = E_u - c_self * u
-                e_field = E_q + E_u
-            else:
-                e_field = E_q
+                e_field = e_field + E_u
 
             # compute induced dipoles
             if alpha is not None:
-                pot_induced = - 0.5 * ((e_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
-                pot = pot + pot_induced
-                u_induced = e_field * alpha[:, None, None]
+                pot_u_induced = - 0.5 * ((e_field ** 2).sum(dim=2) * alpha[:, None]).sum(dim=0) # [n_q]
+                pot = pot + pot_u_induced
+                u_induced = e_field * alpha[:, None, None] # [n, n_q, 3]
 
         output = {
                  'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
@@ -214,7 +217,7 @@ class Ewald(nn.Module):
         return output
 
     # Triclinic box(could be orthorhombic)
-    def compute_potential_triclinic(self, r_raw, q, cell_now, u=None, kappa=None, alpha=None, compute_field=False):
+    def compute_potential_triclinic(self, r_raw, q, cell_now, u=None, kappa=None, alpha=None, compute_potential=False, compute_field=False):
         device = r_raw.device
         if q.dim() == 1:
             one_dim_input = True
@@ -301,12 +304,14 @@ class Ewald(nn.Module):
             if u is not None:
                 pot -= torch.sum(u**2, dim=(0,2)) / ( 3 * self.sigma**3. * self.twopi**1.5) * self.norm_factor
 
-        # for computing electric field
-        if compute_field or alpha is not None:
+        # for computing electric field or potential
+        if compute_field or kappa is not None or alpha is not None:
             #S_k = S_k_real + 1j * S_k_imag
             #exp_ikr = cos_k_dot_r + 1j * sin_k_dot_r
             sk_field = 2 * kfac * torch.conj(S_k)   # [n_q, M]
 
+        # for computing electric potential
+        if compute_potential or kappa is not None:
             # for computing electric potential (phi)
             e_phi = torch.real(
                     factors[None, None, :]       # [1, 1, M]
@@ -317,6 +322,13 @@ class Ewald(nn.Module):
             if self.remove_self_interaction:
                 e_phi -= q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor # [n, n_q] 
 
+            if kappa is not None:
+                # compute induced charges
+                pot_induced = - 0.5 * (e_phi ** 2 * kappa[:, None]).sum(dim=0) # [n_q]
+                pot = pot + pot_induced
+                q_induced = - kappa * e_phi # [n, n_q]
+
+        if compute_field or alpha is not None:
             # for computing electric field
             e_field = torch.real(
                       -1j *
@@ -334,7 +346,7 @@ class Ewald(nn.Module):
 
             # compute induced dipoles
             if alpha is not None:
-                pot_induced = - 0.5 * ((e_field ** 2).sum(dim=2) * alpha).sum(dim=0) # [n_q]
+                pot_induced = - 0.5 * ((e_field ** 2).sum(dim=2) * alpha[:, None]).sum(dim=0) # [n_q]
                 pot = pot + pot_induced                
                 u_induced = e_field * alpha[:, None, None]
 

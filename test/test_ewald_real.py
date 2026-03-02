@@ -19,7 +19,7 @@ q -= torch.mean(q)
 box = torch.tensor([[40.0, 0.0, 0.0], [ 0.0, 40.0, 0.0], [0.0, 0.0, 40.0]], dtype=torch.float32)  # Box dimensions
 
 
-result = ep.compute_potential_triclinic(torch.tensor(r), torch.tensor(q).unsqueeze(1), torch.tensor(box), compute_field=True)
+result = ep.compute_potential_triclinic(torch.tensor(r), torch.tensor(q).unsqueeze(1), torch.tensor(box), compute_field=True, compute_potential=True)
 ew_1, phi_1, field_1 = result['pot'], result['phi'], result['field']
 print(ew_1)
 result_r = ep.compute_potential_realspace(torch.tensor(r), torch.tensor(q), compute_field=True)
