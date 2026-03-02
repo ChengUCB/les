@@ -186,7 +186,7 @@ class Ewald(nn.Module):
         if kappa is not None:
             pot_induced = - 0.5 * (e_phi ** 2 * kappa[:, None]).sum(dim=0) # [n_q]
             pot = pot + pot_induced
-            q_induced = - kappa * e_phi # [n, n_q]
+            q_induced = - kappa[:, None] * e_phi # [n, n_q]
 
         # for computing electric field
         if compute_field or alpha is not None:
@@ -326,7 +326,7 @@ class Ewald(nn.Module):
                 # compute induced charges
                 pot_induced = - 0.5 * (e_phi ** 2 * kappa[:, None]).sum(dim=0) # [n_q]
                 pot = pot + pot_induced
-                q_induced = - kappa * e_phi # [n, n_q]
+                q_induced = - kappa[:, None] * e_phi # [n, n_q]
 
         if compute_field or alpha is not None:
             # for computing electric field
