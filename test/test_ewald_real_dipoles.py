@@ -7,7 +7,7 @@ from les.module import Ewald
 
 ep = Ewald(dl=2.0,
           sigma=2,
-          remove_self_interaction=True,
+          remove_self_interaction=False,
           )
 
 # set the same random seed for reproducibility
@@ -26,7 +26,7 @@ box = torch.tensor([[40.0, 0.0, 0.0], [ 0.0, 40.0, 0.0], [0.0, 0.0, 40.0]], dtyp
 
 
 result = ep.compute_potential_triclinic(r, q, torch.tensor(box),  u=u, compute_field=True)
-ew_1, field_1 = result['pot'], result['field']
+ew_1, phi_1, field_1 = result['pot'], result['phi'], result['field']
 print(ew_1)
 print('reciprocal', field_1)
 # Numerical Calculation (Force / charge)
@@ -36,10 +36,13 @@ print('reciprocal', field_1)
 #print(field_numeric)
 
 result_r = ep.compute_potential_realspace(r, q, u=u, compute_field=True)
-ew_1_s, field_1_s = result_r['pot'], result_r['field']
+ew_1_s, phi_1_s, field_1_s = result_r['pot'], result_r['phi'], result_r['field']
 print(ew_1_s)
 print('real', field_1_s)
 
-print('dif in E_field')
-print(field_1-field_1_s)
+#print('dif in E_field')
+#print(field_1-field_1_s)
 
+print("compare electric potential")
+print(phi_1)
+print(phi_1_s)

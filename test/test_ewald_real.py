@@ -7,7 +7,7 @@ from les.module import Ewald
 
 ep = Ewald(dl=1.5,
           sigma=1,
-          remove_self_interaction=False,
+          remove_self_interaction=True,
           )
 
 # set the same random seed for reproducibility
@@ -20,11 +20,18 @@ box = torch.tensor([[40.0, 0.0, 0.0], [ 0.0, 40.0, 0.0], [0.0, 0.0, 40.0]], dtyp
 
 
 result = ep.compute_potential_triclinic(torch.tensor(r), torch.tensor(q).unsqueeze(1), torch.tensor(box), compute_field=True)
-ew_1, field_1 = result['pot'], result['field']
+ew_1, phi_1, field_1 = result['pot'], result['phi'], result['field']
 print(ew_1)
 result_r = ep.compute_potential_realspace(torch.tensor(r), torch.tensor(q), compute_field=True)
-ew_1_s, field_1_s = result_r['pot'], result_r['field']
+ew_1_s, phi_1_s, field_1_s = result_r['pot'], result_r['phi'], result_r['field']
 print(ew_1_s)
 
+print("compare electric fields")
 print(field_1)
 print(field_1_s)
+
+print("compare electric potential")
+print(phi_1)
+print(phi_1_s)
+
+print(torch.sum(q.unsqueeze(1) * phi_1 / 2), torch.sum(q.unsqueeze(1) * phi_1_s / 2))
