@@ -67,7 +67,7 @@ class Les(nn.Module):
 
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
-        self.use_atomwise = les_arguments.get('use_atomwise', True)
+        self.use_atomwise = les_arguments.get('use_atomwise', False)
         self.use_fixed_charges = les_arguments.get('use_fixed_charges', True)
 
     def forward(self, 
@@ -81,6 +81,7 @@ class Les(nn.Module):
                atomic_numbers: Optional[torch.Tensor] = None, # [n_atoms, ]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
+               compute_field: bool = False,
                compute_bec: bool = False,
                bec_output_index: Optional[int] = None, # option to compute BEC components along only one direction
                ) -> Dict[str, Optional[torch.Tensor]]:
@@ -126,17 +127,18 @@ class Les(nn.Module):
                               r=positions,
                               cell=cell,
                               batch=batch,
+                              compute_field=compute_field,
                               )
         else:
-            E_lr = None
+            E_lr, q_induced, u_induced = None, None, None
 
-        if latent_alphas is not None:
+        if latent_alphas is not None and u_induced is not None:
             if latent_dipoles is not None:
                 latent_dipoles = latent_dipoles + u_induced
             else:
                 latent_dipoles = u_induced
        
-        if latent_kappas is not None: 
+        if latent_kappas is not None and q_induced is not None: 
             latent_charges = latent_charges + q_induced
 
         # compute the BEC
