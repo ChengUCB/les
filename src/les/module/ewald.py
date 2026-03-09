@@ -93,6 +93,7 @@ class Ewald(nn.Module):
             q = q.unsqueeze(1)
         else:
             one_dim_input = False
+        q = q.to(r_raw.dtype)
         n_node, n_q = q.shape
         device = r_raw.device
 
@@ -122,7 +123,7 @@ class Ewald(nn.Module):
         erf[mask_off] = torch.special.erf(r_ij_norm[mask_off] * a) # the s0 term
 
         # charge-charge kernel, diagonal terms are zero
-        f_qq = erf * rinv * norm_const # [n_node, n_node]
+        f_qq = (erf * rinv * norm_const).to(r_raw.dtype) # [n_node, n_node]
         # electric potential at r_j due to q at r_i, sum over i
         e_phi = torch.einsum('iq,ij->jq', q, f_qq) # [n_node, n_q]
         pot = 0.5 * torch.einsum('iq,iq->q', e_phi, q) # [n_q], potential energy
