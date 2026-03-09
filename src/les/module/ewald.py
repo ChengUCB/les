@@ -324,7 +324,7 @@ class Ewald(nn.Module):
 
             if kappa is not None:
                 # compute induced charges
-                pot_induced = - (e_phi ** 2 * kappa[:, None]).sum(dim=0) # [n_q]
+                pot_induced = - 0.5 * (e_phi ** 2 * kappa[:, None]).sum(dim=0) # [n_q]
                 pot = pot + pot_induced
                 q_induced = - kappa[:, None] * e_phi  # [n, n_q]
 
@@ -346,7 +346,7 @@ class Ewald(nn.Module):
 
             # compute induced dipoles
             if alpha is not None:
-                pot_induced = - ((e_field ** 2).sum(dim=2) * alpha[:, None]).sum(dim=0) # [n_q]
+                pot_induced = - 0.5 * ((e_field ** 2).sum(dim=2) * alpha[:, None]).sum(dim=0) # [n_q]
                 pot = pot + pot_induced                
                 u_induced = e_field * alpha[:, None, None]
 
