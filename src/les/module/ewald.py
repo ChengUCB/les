@@ -102,6 +102,7 @@ class Ewald(nn.Module):
         u_induced = torch.zeros((n_node, n_q, 3), device=device, dtype=r_raw.dtype)
 
         if u is not None:
+            u = u.to(r_raw.dtype)
             if u.dim() == 2 and u.shape[1] == 3:
                 u = u.unsqueeze(1)
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
@@ -234,6 +235,7 @@ class Ewald(nn.Module):
         u_induced = torch.zeros((n_node, n_q, 3), device=device, dtype=r_raw.dtype)
 
         if u is not None:
+            u = u.to(r_raw.dtype)
             if u.dim() == 2 and u.shape[1] == 3:
                 u = u.unsqueeze(1)
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
