@@ -175,7 +175,10 @@ class Ewald(nn.Module):
 
         # for computing induced charges
         if kappa is not None:
-            q_induced = - kappa.unsqueeze(1) * e_phi # [n, n_q]
+            if kappa.dim() == 1:
+                kappa = kappa.unsqueeze(1)
+            assert kappa.dim() == 2, 'kappa dimension error'
+            q_induced = - kappa * e_phi # [n, n_q]
             pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
             pot += pot_induced
 
@@ -194,7 +197,10 @@ class Ewald(nn.Module):
 
             # compute induced dipoles
             if alpha is not None:
-                u_induced = e_field * alpha.unsqueeze(1).unsqueeze(2) # [n, n_q, 3]
+                if alpha.dim() == 1:
+                    alpha = alpha.unsqueeze(1)
+                assert alpha.dim() == 2, 'alpha dimension error'
+                u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
                 pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_u_induced
 
@@ -314,7 +320,10 @@ class Ewald(nn.Module):
                 e_phi -= q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor # [n, n_q] 
 
             if kappa is not None: # compute induced charges
-                q_induced = - kappa.unsqueeze(1) * e_phi  # [n, n_q]
+                if kappa.dim() == 1:
+                    kappa = kappa.unsqueeze(1)
+                assert kappa.dim() == 2, 'kappa dimension error'
+                q_induced = - kappa * e_phi  # [n, n_q]
                 pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
                 pot += pot_induced
 
@@ -332,7 +341,10 @@ class Ewald(nn.Module):
 
             # compute induced dipoles
             if alpha is not None:
-                u_induced = e_field * alpha.unsqueeze(1).unsqueeze(2) # [n, n_q, 3]
+                if alpha.dim() == 1:
+                    alpha = alpha.unsqueeze(1)
+                assert alpha.dim() == 2, 'alpha dimension error'
+                u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
                 pot_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_induced                
 
