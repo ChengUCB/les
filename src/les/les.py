@@ -134,6 +134,9 @@ class Les(nn.Module):
 
         if latent_alphas is not None and u_induced is not None:
             if latent_dipoles is not None:
+                if latent_dipoles.dim() == 2 and u_induced.dim() == 3:
+                    latent_dipoles = latent_dipoles.unsqueeze(1) # [n_node, 1, 3]
+                assert latent_dipoles.shape == u_induced.shape, f'latent_dipoles dimension error'
                 latent_dipoles = latent_dipoles + u_induced
             else:
                 latent_dipoles = u_induced
