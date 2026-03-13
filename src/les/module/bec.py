@@ -49,7 +49,7 @@ class BEC(nn.Module):
         all_P = []
         all_P_u = []
         all_phases = [] 
-        for i in unique_batches:
+        for i in unique_batches.long():
             mask = batch == i  # Create a mask for the i-th configuration
             r_now, q_now = r[mask], q[mask]
 
