@@ -166,3 +166,142 @@ class Les(nn.Module):
 class _DummyAtomwise(nn.Module):
     def forward(self, desc: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         raise ValueError("set use_atomwise to True to use Atomwise module")
+
+
+class LesVector(nn.Module):
+
+    def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
+        """
+        LES model for long-range interations
+        """
+        super().__init__()
+
+        if isinstance(les_arguments, str):
+            import yaml
+            with open(les_arguments, 'r') as file:
+                les_arguments = yaml.safe_load(file)
+                if les_arguments is None:
+                    les_arguments = {}
+
+        self._parse_arguments(les_arguments)
+
+        self.fixed_charges = FixedCharges()
+
+        self.ewald = Ewald(
+            sigma=self.sigma,
+            dl=self.dl,
+            remove_self_interaction=self.remove_self_interaction,
+            )
+
+        self.bec = BEC(
+             remove_mean=self.remove_mean,
+             epsilon_factor=self.epsilon_factor,
+             )
+
+    def _parse_arguments(self, les_arguments: Dict[str, Any]):
+        """
+        Parse arguments for LES model
+        """
+        self.output_scaling_factor = les_arguments.get('output_scaling_factor', 0.1)
+
+        self.sigma = les_arguments.get('sigma', 1.0)
+        self.dl = les_arguments.get('dl', 2.0)
+        self.remove_self_interaction = les_arguments.get('remove_self_interaction', True)
+
+        self.remove_mean = les_arguments.get('remove_mean', True)
+        self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
+        self.use_fixed_charges = les_arguments.get('use_fixed_charges', True)
+
+    def forward(self, 
+               positions: torch.Tensor, # [n_atoms, 3]
+               cell: torch.Tensor, # [batch_size, 3, 3]
+               latent_charges: torch.Tensor, # [n_atoms, ]
+               e_ext : torch.Tensor, #[3]
+               n_scf: int = 1,
+               latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
+               latent_kappas: Optional[torch.Tensor] = None, # [n_atoms, 3]
+               latent_alphas: Optional[torch.Tensor] = None, # [n_atoms, 3, 3]
+               atomic_numbers: Optional[torch.Tensor] = None, # [n_atoms, ]
+               batch: Optional[torch.Tensor] = None,
+               compute_energy: bool = True,
+               compute_field: bool = False,
+               compute_bec: bool = False,
+               bec_output_index: Optional[int] = None, # option to compute BEC components along only one direction
+               ) -> Dict[str, Optional[torch.Tensor]]:
+        """
+        arguments:
+        desc: torch.Tensor
+        Descriptors for the atoms. Shape: (n_atoms, n_features)
+        latent_charges: torch.Tensor
+        One can also directly input the latent charges. Shape: (n_atoms, )
+        positions: torch.Tensor
+            positions of the atoms. Shape: (n_atoms, 3)
+        cell: torch.Tensor
+            cell of the system. Shape: (batch_size, 3, 3)
+        batch: torch.Tensor
+            batch of the system. Shape: (n_atoms,)
+        """
+        # check the input shapes
+        if batch is None:
+            batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)
+            
+        assert latent_charges.shape[0] == positions.shape[0]
+
+        if atomic_numbers is not None and self.use_fixed_charges:
+            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
+
+        # compute the long-range interactions
+        for _ in range(n_scf):
+            ewald_out = self.ewald(q=latent_charges,
+                                r=positions,
+                                e_ext=e_ext,
+                                cell=cell,
+                                batch=batch,
+                                u=latent_dipoles,
+                                compute_field=True,
+                                )
+            efield = ewald_out["field"] + e_ext
+            q_induced = torch.einsum("ni,i->n",latent_kappas,efield)
+            mu_induced = torch.einsum("nij,j->ni",latent_alphas,efield)
+            latent_charges = latent_charges + q_induced
+            latent_dipoles = latent_dipoles + mu_induced
+
+        ewald_out = self.ewald(q=latent_charges,
+                            r=positions,
+                            e_ext=e_ext,
+                            cell=cell,
+                            batch=batch,
+                            u=latent_dipoles,
+                            compute_field=True,
+                            )
+    
+        output = {
+                 'E_lr': ewald_out["pot"],
+                 'field': ewald_out["e_field"],
+                 'pot_ext': ewald_out["pot_ext"],
+                 }
+
+        # compute the BEC
+        if compute_bec:
+            bec = self.bec(q=latent_charges,
+                           u=latent_dipoles,
+                           r=positions,
+                           cell=cell,
+                           batch=batch,
+                           output_index=bec_output_index,
+		           )
+        else:
+            bec = None
+
+        output = {
+                 'E_lr': ewald_out["pot"],
+                 'field': ewald_out["e_field"],
+                 'E_ext': ewald_out["pot_ext"],
+                 'BEC':bec,
+                 }
+
+        return output 
+
+class _DummyAtomwise(nn.Module):
+    def forward(self, desc: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
+        raise ValueError("set use_atomwise to True to use Atomwise module")

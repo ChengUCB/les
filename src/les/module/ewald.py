@@ -29,6 +29,7 @@ class Ewald(nn.Module):
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
                 r: torch.Tensor, # [n_atoms, 3]
+                e_ext: torch.Tensor,
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
@@ -62,13 +63,13 @@ class Ewald(nn.Module):
             # check if the box is periodic or not
             if box_now is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
-                result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, u=u_now, 
+                result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, e_ext=e_ext, u=u_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
-                result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, 
+                result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, e_ext=e_ext,
                                                           cell_now=box_now, u=u_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
@@ -205,17 +206,23 @@ class Ewald(nn.Module):
                 pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_u_induced
 
+        mu = (q.squeeze()[:,None] * r_raw).sum(dim=0)
+        mu = mu + u.squeeze().sum(dim=0)
+        pot_ext = (e_ext * mu).sum()
+        pot = pot + pot_ext #Well-defined for finite systems
+
         output = {
                  'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
                  'q_induced': q_induced.squeeze(dim=1) if one_dim_input else q_induced,
                  'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
                  'phi': e_phi,
                  'field': e_field,
+                 'E_ext': pot_ext,
                  }
         return output
 
     # Triclinic box(could be orthorhombic)
-    def compute_potential_triclinic(self, r_raw, q, cell_now, 
+    def compute_potential_triclinic(self, r_raw, q, e_ext, cell_now, 
                                     u: Optional[torch.Tensor]=None, 
                                     kappa:Optional[torch.Tensor]=None, 
                                     alpha:Optional[torch.Tensor]=None, 
@@ -348,7 +355,11 @@ class Ewald(nn.Module):
                 assert alpha.dim() == 2, 'alpha dimension error'
                 u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
                 pot_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
-                pot += pot_induced                
+                pot += pot_induced
+
+        mu = (q.squeeze()[:,None] * r_raw).sum(dim=0)
+        mu = mu + u.squeeze().sum(dim=0)
+        pot_ext = (e_ext * mu).sum()
 
         output = {
                  'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
@@ -356,6 +367,7 @@ class Ewald(nn.Module):
                  'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
                  'phi': e_phi,
                  'field': e_field,
+                 'pot_ext:': pot_ext,
                  }
         return output
 
