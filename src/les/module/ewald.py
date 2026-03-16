@@ -24,7 +24,6 @@ class Ewald(nn.Module):
         # \epsilon_0 = 5.55263*10^{-3} e^2 eV^{-1} A^{-1}
         self.norm_factor = norm_factor
         self.k_sq_max = (self.twopi / self.dl) ** 2
-        self.a = 1.0 / (self.sigma * (2.0 ** 0.5))          # 1/(sqrt(2)*sigma)
 
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
@@ -118,7 +117,7 @@ class Ewald(nn.Module):
         rinv2 = rinv * rinv
         rinv3 = rinv2 * rinv
 
-        a = self.a         # 1/(sqrt(2)*sigma)
+        a = 1.0 / (self.sigma * (2.0 ** 0.5))         # 1/(sqrt(2)*sigma)
         # Error function scaling for long-range interactions
         erf = torch.zeros_like(r_ij_norm)
         erf[mask_off] = torch.special.erf(r_ij_norm[mask_off] * a) # the s0 term
@@ -338,7 +337,8 @@ class Ewald(nn.Module):
                        * term_imag.unsqueeze(3) * kvec.unsqueeze(0).unsqueeze(0)).sum(dim=2) # [n, n_q, 3]
 
             if self.remove_self_interaction and u is not None:
-                c_self = (4.0 / (3.0 * torch.pi**0.5)) * (self.a**3) / self.twopi * self.norm_factor
+                a = 1.0 / (self.sigma * (2.0 ** 0.5))
+                c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor
                 e_field += c_self * u
 
             # compute induced dipoles
