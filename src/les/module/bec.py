@@ -83,13 +83,13 @@ class BEC(nn.Module):
 
         # take the gradient of the polarization w.r.t. the positions to get the complex BEC
         #Grad returns P on 2nd index, BEC is defined with P on first index 
-        bec_complex = grad(y=P, x=r).transpose(1,2)
+        bec_complex = grad(y=P, x=r).transpose(1,2).contiguous()
         # dephase
-        result = bec_complex * phases.unsqueeze(1).conj()
+        result = bec_complex * phases.unsqueeze(2).conj() #Multiply on 1st index
         result = result.real
         if u is not None:
             P_u = torch.stack(all_P_u, dim=0)
-            result_u = grad(y=P_u, x=r).transpose(1,2)
+            result_u = grad(y=P_u, x=r).transpose(1,2).contiguous()
             return torch.stack([result, result_u], dim=1)
         return result
  
