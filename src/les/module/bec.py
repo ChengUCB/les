@@ -89,7 +89,7 @@ class BEC(nn.Module):
         result = result.real
         if u is not None:
             P_u = torch.stack(all_P_u, dim=0)
-            result_u = grad(y=P_u, x=r)
+            result_u = grad(y=P_u, x=r).transpose(1,2)
             return torch.stack([result, result_u], dim=1)
         return result
  
