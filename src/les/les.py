@@ -9,7 +9,7 @@ from .module import (
     FixedCharges,
 )
 
-__all__ = ['Les']
+__all__ = ['Les','LesVector']
 
 class Les(nn.Module):
 
@@ -73,6 +73,7 @@ class Les(nn.Module):
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]
+               e_ext: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
                latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
@@ -102,7 +103,6 @@ class Les(nn.Module):
         if batch is None:
             batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)
 
-
         if latent_charges is not None:
             # check the shape of latent charges
             assert latent_charges.shape[0] == positions.shape[0]
@@ -116,12 +116,14 @@ class Les(nn.Module):
             raise ValueError("Either desc or latent_charges must be provided")
 
         if atomic_numbers is not None and self.use_fixed_charges:
-            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
+            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)[:,None]
 
         # compute the long-range interactions
         if compute_energy:
-            E_lr, q_induced, u_induced = self.ewald(q=latent_charges,
+            # print("LES:",latent_charges.shape,latent_dipoles.shape,latent_kappas.shape,latent_alphas.shape)
+            ewald_out = self.ewald(q=latent_charges,
                               u=latent_dipoles,
+                              e_ext=e_ext,
                               kappa=latent_kappas,
                               alpha=latent_alphas,
                               r=positions,
@@ -130,7 +132,10 @@ class Les(nn.Module):
                               compute_field=compute_field,
                               )
         else:
-            E_lr, q_induced, u_induced = None, None, None
+            ewald_out = {"E_lr": None, "q_induced": None, "u_induced": None}
+        E_lr = ewald_out["E_lr"]
+        q_induced = ewald_out["q_induced"]
+        u_induced = ewald_out["u_induced"]
 
         if latent_alphas is not None and u_induced is not None:
             if latent_dipoles is not None:
@@ -159,6 +164,9 @@ class Les(nn.Module):
         output = {
             'E_lr': E_lr,
             'latent_charges': latent_charges,
+            'latent_dipoles': latent_dipoles,
+            'q_induced': q_induced,
+            'u_induced': u_induced,
             'BEC': bec,
             }
         return output 
@@ -166,7 +174,6 @@ class Les(nn.Module):
 class _DummyAtomwise(nn.Module):
     def forward(self, desc: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
         raise ValueError("set use_atomwise to True to use Atomwise module")
-
 
 class LesVector(nn.Module):
 
@@ -217,7 +224,7 @@ class LesVector(nn.Module):
                cell: torch.Tensor, # [batch_size, 3, 3]
                latent_charges: torch.Tensor, # [n_atoms, ]
                e_ext : torch.Tensor, #[3]
-               n_scf: int = 1,
+               n_scf: int = 0,
                latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
                latent_kappas: Optional[torch.Tensor] = None, # [n_atoms, 3]
                latent_alphas: Optional[torch.Tensor] = None, # [n_atoms, 3, 3]
@@ -251,18 +258,19 @@ class LesVector(nn.Module):
             latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
 
         # compute the long-range interactions
-        for _ in range(n_scf):
-            ewald_out = self.ewald(q=latent_charges,
+        # different kappa/alpha for each iteration
+        for i in range(n_scf+1):
+            ewald_out = self.ewald(q=latent_charges[:,None],
                                 r=positions,
                                 e_ext=e_ext,
                                 cell=cell,
                                 batch=batch,
-                                u=latent_dipoles,
+                                u=latent_dipoles[:,None,:],
                                 compute_field=True,
                                 )
-            efield = ewald_out["field"] + e_ext
-            q_induced = torch.einsum("ni,i->n",latent_kappas,efield)
-            mu_induced = torch.einsum("nij,j->ni",latent_alphas,efield)
+            efield = ewald_out["field"].squeeze() + e_ext[None,:]
+            q_induced = torch.einsum("ni,ni->n",latent_kappas[:,i,:],efield)
+            mu_induced = torch.einsum("nij,nj->ni",latent_alphas[:,i,:,:],efield)
             latent_charges = latent_charges + q_induced
             latent_dipoles = latent_dipoles + mu_induced
 
@@ -274,12 +282,6 @@ class LesVector(nn.Module):
                             u=latent_dipoles,
                             compute_field=True,
                             )
-    
-        output = {
-                 'E_lr': ewald_out["pot"],
-                 'field': ewald_out["e_field"],
-                 'pot_ext': ewald_out["pot_ext"],
-                 }
 
         # compute the BEC
         if compute_bec:
@@ -294,9 +296,8 @@ class LesVector(nn.Module):
             bec = None
 
         output = {
-                 'E_lr': ewald_out["pot"],
-                 'field': ewald_out["e_field"],
-                 'E_ext': ewald_out["pot_ext"],
+                 'E_lr': ewald_out["E_lr"],
+                 'E_ext': ewald_out["E_ext"],
                  'BEC':bec,
                  }
 

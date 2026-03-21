@@ -1,4 +1,5 @@
 import torch
+from torch._prims_common import torch_function_passthrough
 import torch.nn as nn
 from itertools import product
 from typing import Dict, Optional, Tuple, List
@@ -29,14 +30,16 @@ class Ewald(nn.Module):
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
                 r: torch.Tensor, # [n_atoms, 3]
-                e_ext: torch.Tensor,
                 cell: torch.Tensor, # [batch_size, 3, 3]
+                e_ext: Optional[torch.Tensor] = None,
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
                 kappa: Optional[torch.Tensor] = None, # [n_atoms]
                 alpha: Optional[torch.Tensor] = None, # [n_atoms]
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    
+        self.a = 1.0 / (self.sigma * (2.0 ** 0.5)) 
         
         # Check the input dimension
         n, d = r.shape
@@ -46,10 +49,14 @@ class Ewald(nn.Module):
             batch = torch.zeros(n, dtype=torch.int64, device=r.device)
 
         unique_batches = torch.unique(batch)  # Get unique batch indices
+        if e_ext is None:
+            e_ext = torch.zeros_like(r[0])
 
         results: List[torch.Tensor] = []
         q_induced_results: List[torch.Tensor] = []
         u_induced_results: List[torch.Tensor] = []
+        phi_results: List[torch.Tensor] = []
+        field_results: List[torch.Tensor] = []
         for i in unique_batches.long():
             mask = batch == i  # Create a mask for the i-th configuration
             # Calculate the potential energy for the i-th configuration
@@ -74,13 +81,23 @@ class Ewald(nn.Module):
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
-            results.append(result['pot'])
+            results.append(result['E_lr'])
             q_induced_results.append(result['q_induced'])
             u_induced_results.append(result['u_induced'])
+            phi_results.append(result["phi"])
+            field_results.append(result["field"])
 
-        return torch.cat(results), torch.cat(q_induced_results), torch.cat(u_induced_results)
+        output = {
+            "E_lr": torch.cat(results),
+            "q_induced": torch.cat(q_induced_results),
+            "u_induced": torch.cat(u_induced_results),
+            "phi": torch.cat(phi_results),
+            "field": torch.cat(field_results),
+        }
 
-    def compute_potential_realspace(self, r_raw, q, 
+        return output
+
+    def compute_potential_realspace(self, r_raw, q, e_ext,
                                     u: Optional[torch.Tensor]=None, 
                                     kappa: Optional[torch.Tensor]=None, 
                                     alpha: Optional[torch.Tensor]=None, 
@@ -180,6 +197,10 @@ class Ewald(nn.Module):
             if kappa.dim() == 1:
                 kappa = kappa.unsqueeze(1)
             assert kappa.dim() == 2, 'kappa dimension error'
+            #External field coupling to induced charges
+            # r_raw_no_mean = r_raw - r_raw.mean(dim=0)[None,:]
+            # phi_ext = -(e_ext[None,:]*r_raw_no_mean).sum(dim=1)[:,None]
+            # e_phi_plus_e_ext = e_phi + phi_ext
             q_induced = - kappa * e_phi # [n, n_q]
             pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
             pot += pot_induced
@@ -202,22 +223,18 @@ class Ewald(nn.Module):
                 if alpha.dim() == 1:
                     alpha = alpha.unsqueeze(1)
                 assert alpha.dim() == 2, 'alpha dimension error'
-                u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
-                pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
+                #External field coupling to induced dipoles
+                e_field_plus_ext = e_field + e_ext[None,None,:]
+                u_induced = e_field_plus_ext * alpha.unsqueeze(2) # [n, n_q, 3]
+                pot_u_induced = - 0.5 * (e_field_plus_ext * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_u_induced
 
-        mu = (q.squeeze()[:,None] * r_raw).sum(dim=0)
-        mu = mu + u.squeeze().sum(dim=0)
-        pot_ext = (e_ext * mu).sum()
-        pot = pot + pot_ext #Well-defined for finite systems
-
         output = {
-                 'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
+                 'E_lr': pot.sum().view(-1), # sum over the energy contributions from different nq channels
                  'q_induced': q_induced.squeeze(dim=1) if one_dim_input else q_induced,
                  'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
                  'phi': e_phi,
                  'field': e_field,
-                 'E_ext': pot_ext,
                  }
         return output
 
@@ -332,7 +349,10 @@ class Ewald(nn.Module):
                 if kappa.dim() == 1:
                     kappa = kappa.unsqueeze(1)
                 assert kappa.dim() == 2, 'kappa dimension error'
-                q_induced = - kappa * e_phi  # [n, n_q]
+                # r_raw_no_mean = r_raw - r_raw.mean(dim=0)[None,:]
+                # phi_ext = -(e_ext[None,:]*r_raw_no_mean).sum(dim=1)[:,None]
+                # e_phi_plus_e_ext = e_phi + phi_ext
+                q_induced = - kappa * e_phi # [n, n_q]
                 pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
                 pot += pot_induced
 
@@ -353,21 +373,18 @@ class Ewald(nn.Module):
                 if alpha.dim() == 1:
                     alpha = alpha.unsqueeze(1)
                 assert alpha.dim() == 2, 'alpha dimension error'
-                u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
-                pot_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
-                pot += pot_induced
-
-        mu = (q.squeeze()[:,None] * r_raw).sum(dim=0)
-        mu = mu + u.squeeze().sum(dim=0)
-        pot_ext = (e_ext * mu).sum()
+                #External field coupling to induced dipoles
+                e_field_plus_ext = e_field + e_ext[None,None,:]
+                u_induced = e_field_plus_ext * alpha.unsqueeze(2) # [n, n_q, 3]
+                pot_u_induced = - 0.5 * (e_field_plus_ext * u_induced).sum(dim=(0,2)) # [n_q]
+                pot += pot_u_induced
 
         output = {
-                 'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
+                 'E_lr': pot.sum().view(-1), # sum over the energy contributions from different nq channels
                  'q_induced': q_induced.squeeze(dim=1) if one_dim_input else q_induced,
                  'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
                  'phi': e_phi,
                  'field': e_field,
-                 'pot_ext:': pot_ext,
                  }
         return output
 
