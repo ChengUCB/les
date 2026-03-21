@@ -65,10 +65,11 @@ class BEC(nn.Module):
         phases = torch.cat(all_phases, dim=0)
 
         # take the gradient of the polarization w.r.t. the positions to get the complex BEC
-        bec_complex = grad(y=P, x=r)
+        #Grad returns P on 2nd index, BEC is defined with P on first index 
+        bec_complex = grad(y=P, x=r).transpose(1,2).contiguous()
    
         # dephase
-        result = bec_complex * phases.unsqueeze(1).conj()
+        result = bec_complex * phases.unsqueeze(2).conj() #Multiply on 1st index
         return result.real
  
     def compute_pol_pbc(self, r_now, q_now, box_now):
