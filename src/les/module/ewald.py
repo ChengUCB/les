@@ -31,8 +31,8 @@ class Ewald(nn.Module):
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
-                kappa: Optional[torch.Tensor] = None, # [n_atoms]
-                alpha: Optional[torch.Tensor] = None, # [n_atoms]
+                kappa: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms]
+                alpha: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms, n_q, 3, 3] or [n_atoms] or [n_atoms, 3, 3]
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
@@ -175,10 +175,7 @@ class Ewald(nn.Module):
 
         # for computing induced charges
         if kappa is not None:
-            if kappa.dim() == 1:
-                kappa = kappa.unsqueeze(1)
-            assert kappa.dim() == 2, 'kappa dimension error'
-            q_induced = - kappa * e_phi # [n, n_q]
+            q_induced = self._get_induced_q(e_phi, kappa)
             pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
             pot += pot_induced
 
@@ -197,10 +194,7 @@ class Ewald(nn.Module):
 
             # compute induced dipoles
             if alpha is not None:
-                if alpha.dim() == 1:
-                    alpha = alpha.unsqueeze(1)
-                assert alpha.dim() == 2, 'alpha dimension error'
-                u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
+                u_induced = self._get_induced_u(e_field, alpha)
                 pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_u_induced
 
@@ -212,6 +206,25 @@ class Ewald(nn.Module):
                  'field': e_field,
                  }
         return output
+
+    def _get_induced_q(self, e_phi, kappa):
+        if kappa.dim() == 1:
+            kappa = kappa.unsqueeze(1)
+        assert kappa.dim() == 2, 'kappa dimension error'
+        q_induced = - kappa * e_phi # [n, n_q]
+        return q_induced
+
+    def _get_induced_u(self, e_field, alpha):
+        if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
+            alpha = alpha.unsqueeze(1)
+        if alpha.dim() == 2:
+            u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
+        elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3):
+            # e_field: [n, n_q, 3], alpha: [n, n_q, 3, 3]
+            u_induced = torch.einsum('iqc,iqcd->iqd', e_field, alpha)
+        else:
+            raise ValueError('alpha dimension error')
+        return u_induced
 
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, 
@@ -321,10 +334,7 @@ class Ewald(nn.Module):
                 e_phi -= q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor # [n, n_q] 
 
             if kappa is not None: # compute induced charges
-                if kappa.dim() == 1:
-                    kappa = kappa.unsqueeze(1)
-                assert kappa.dim() == 2, 'kappa dimension error'
-                q_induced = - kappa * e_phi  # [n, n_q]
+                q_induced = self._get_induced_q(e_phi, kappa)
                 pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
                 pot += pot_induced
 
@@ -343,10 +353,7 @@ class Ewald(nn.Module):
 
             # compute induced dipoles
             if alpha is not None:
-                if alpha.dim() == 1:
-                    alpha = alpha.unsqueeze(1)
-                assert alpha.dim() == 2, 'alpha dimension error'
-                u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
+                u_induced = self._get_induced_u(e_field, alpha)
                 pot_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_induced                
 
