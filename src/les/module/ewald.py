@@ -33,6 +33,7 @@ class Ewald(nn.Module):
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
                 kappa: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms]
                 alpha: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms, n_q, 3, 3] or [n_atoms] or [n_atoms, 3, 3]
+                e_ext: Optional[torch.Tensor] = None,
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
@@ -42,6 +43,9 @@ class Ewald(nn.Module):
         assert n == q.size(0), 'q dimension error'
         if batch is None:
             batch = torch.zeros(n, dtype=torch.int64, device=r.device)
+        if e_ext is None:
+            e_ext = torch.zeros_like(r[0])
+        self.e_ext = e_ext
 
         unique_batches = torch.unique(batch)  # Get unique batch indices
 
@@ -61,13 +65,13 @@ class Ewald(nn.Module):
             # check if the box is periodic or not
             if box_now is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
-                result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, u=u_now, 
+                result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, u=u_now,
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
-                result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, 
+                result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now,
                                                           cell_now=box_now, u=u_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
@@ -78,7 +82,7 @@ class Ewald(nn.Module):
 
         return torch.cat(results), torch.cat(q_induced_results), torch.cat(u_induced_results)
 
-    def compute_potential_realspace(self, r_raw, q, 
+    def compute_potential_realspace(self, r_raw, q,
                                     u: Optional[torch.Tensor]=None, 
                                     kappa: Optional[torch.Tensor]=None, 
                                     alpha: Optional[torch.Tensor]=None, 
@@ -221,6 +225,7 @@ class Ewald(nn.Module):
             u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
         elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3):
             # e_field: [n, n_q, 3], alpha: [n, n_q, 3, 3]
+            e_field = e_field + self.e_ext[None,:]
             u_induced = torch.einsum('iqc,iqcd->iqd', e_field, alpha)
         else:
             raise ValueError('alpha dimension error')

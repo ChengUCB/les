@@ -73,6 +73,7 @@ class Les(nn.Module):
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]
+               e_ext: Optional[torch.Tensor]= None,
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
                latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
@@ -102,6 +103,8 @@ class Les(nn.Module):
         if batch is None:
             batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)
 
+        if e_ext is None:
+            e_ext = torch.zeros_like(positions[0])
 
         if latent_charges is not None:
             # check the shape of latent charges
@@ -128,6 +131,7 @@ class Les(nn.Module):
                               cell=cell,
                               batch=batch,
                               compute_field=compute_field,
+                              e_ext = e_ext,
                               )
         else:
             E_lr, q_induced, u_induced = None, None, None
