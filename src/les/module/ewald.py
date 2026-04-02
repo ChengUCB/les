@@ -11,7 +11,7 @@ class Ewald(nn.Module):
                  dl=2.0,  # grid resolution
                  sigma=1.0,  # width of the Gaussian on each atom
                  remove_self_interaction=True,
-                 norm_factor=90.0474,
+                 norm_factor=90.4756,
                  ):
         super().__init__()
         self.dl = dl
@@ -21,7 +21,7 @@ class Ewald(nn.Module):
         self.twopi_sq = self.twopi ** 2
         self.remove_self_interaction = remove_self_interaction
         # 1/2\epsilon_0, where \epsilon_0 is the vacuum permittivity
-        # \epsilon_0 = 5.55263*10^{-3} e^2 eV^{-1} A^{-1}
+        # \epsilon_0 = 5.52635*10^{-3} e^2 eV^{-1} A^{-1}
         self.norm_factor = norm_factor
         self.k_sq_max = (self.twopi / self.dl) ** 2
 
