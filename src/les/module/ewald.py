@@ -26,7 +26,6 @@ class Ewald(nn.Module):
         self.norm_factor = norm_factor
         self.k_sq_max = (self.twopi / self.dl) ** 2
         self.use_epsilon_r_scaling = use_epsilon_r_scaling
-        print("use epsilon_r_scaling:", self.use_epsilon_r_scaling)
 
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
@@ -274,7 +273,6 @@ class Ewald(nn.Module):
         # use epsilon_r to scale the potential and field if alpha is provided
         if alpha is not None and hasattr(self, 'use_epsilon_r_scaling') and self.use_epsilon_r_scaling:
             epsilon_r = self._get_epsilon_r(alpha, volume) #[n_q]
-            print("epsilon_r:", epsilon_r)
         else:
             epsilon_r = torch.ones(n_q, device=device, dtype=r_raw.dtype)
 
