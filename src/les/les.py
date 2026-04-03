@@ -45,6 +45,7 @@ class Les(nn.Module):
             sigma=self.sigma,
             dl=self.dl,
             remove_self_interaction=self.remove_self_interaction,
+            use_epsilon_r_scaling=self.use_epsilon_r_scaling,
             )
 
         self.bec = BEC(
@@ -69,6 +70,7 @@ class Les(nn.Module):
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', False)
         self.use_fixed_charges = les_arguments.get('use_fixed_charges', True)
+        self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
