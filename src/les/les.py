@@ -49,6 +49,7 @@ class Les(nn.Module):
             sigma=self.sigma,
             dl=self.dl,
             remove_self_interaction=self.remove_self_interaction,
+            use_epsilon_r_scaling=self.use_epsilon_r_scaling,
             )
 
         self.bec = BEC(
@@ -74,6 +75,7 @@ class Les(nn.Module):
         self.use_atomwise = les_arguments.get('use_atomwise', False)
         self.use_fixed_charges = les_arguments.get('use_fixed_charges', False)
         self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
+        self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
@@ -124,6 +126,7 @@ class Les(nn.Module):
 
         if atomic_numbers is not None and hasattr(self, 'use_atomic_alpha') and self.use_atomic_alpha and latent_alphas is not None:
             baseline_alphas = self.atomic_alpha(atomic_numbers)
+            #print(f'baseline_alphas: {baseline_alphas}')
             if latent_alphas.dim() == 1:
                 latent_alphas = latent_alphas + baseline_alphas
             elif latent_alphas.dim() == 3:
@@ -172,6 +175,7 @@ class Les(nn.Module):
             'E_lr': E_lr,
             'latent_charges': latent_charges,
             'latent_dipoles': latent_dipoles,
+            'latent_alphas': latent_alphas,
             'BEC': bec,
             }
         return output 
