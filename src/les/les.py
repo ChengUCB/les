@@ -7,6 +7,7 @@ from .module import (
     Ewald,
     BEC,
     FixedCharges,
+    AtomicAlpha,
 )
 
 __all__ = ['Les']
@@ -39,13 +40,15 @@ class Les(nn.Module):
             else _DummyAtomwise()
         )
 
-        self.fixed_charges = FixedCharges()
+        if self.use_fixed_charges:
+            self.fixed_charges = FixedCharges()
+        if self.use_atomic_alpha:
+            self.atomic_alpha = AtomicAlpha()
 
         self.ewald = Ewald(
             sigma=self.sigma,
             dl=self.dl,
             remove_self_interaction=self.remove_self_interaction,
-            use_epsilon_r_scaling=self.use_epsilon_r_scaling,
             )
 
         self.bec = BEC(
@@ -69,8 +72,8 @@ class Les(nn.Module):
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', False)
-        self.use_fixed_charges = les_arguments.get('use_fixed_charges', True)
-        self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
+        self.use_fixed_charges = les_arguments.get('use_fixed_charges', False)
+        self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
 
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
@@ -104,7 +107,6 @@ class Les(nn.Module):
         if batch is None:
             batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)
 
-
         if latent_charges is not None:
             # check the shape of latent charges
             assert latent_charges.shape[0] == positions.shape[0]
@@ -117,8 +119,16 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
-        if atomic_numbers is not None and self.use_fixed_charges:
-            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
+        #if atomic_numbers is not None and hasattr(self, 'use_fixed_charges') and self.use_fixed_charges:
+        #    latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
+
+        if atomic_numbers is not None and hasattr(self, 'use_atomic_alpha') and self.use_atomic_alpha and latent_alphas is not None:
+            baseline_alphas = self.atomic_alpha(atomic_numbers)
+            if latent_alphas.dim() == 1:
+                latent_alphas = latent_alphas + baseline_alphas
+            elif latent_alphas.dim() == 3:
+                latent_alphas = latent_alphas + baseline_alphas[:,None,None] * torch.eye(3, device=baseline_alphas.device).unsqueeze(0) # [n_atoms, 3, 3]
+          
 
         # compute the long-range interactions
         if compute_energy:
