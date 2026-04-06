@@ -73,7 +73,7 @@ class Les(nn.Module):
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', False)
-        self.use_fixed_charges = les_arguments.get('use_fixed_charges', False)
+        self.use_fixed_atomic_charges = les_arguments.get('use_fixed_atomic_charges', False)
         self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
         self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
@@ -121,8 +121,8 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
-        #if atomic_numbers is not None and hasattr(self, 'use_fixed_charges') and self.use_fixed_charges:
-        #    latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
+        if atomic_numbers is not None and hasattr(self, 'use_fixed_atomic_charges') and self.use_fixed_atomic_charges:
+            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
 
         if atomic_numbers is not None and hasattr(self, 'use_atomic_alpha') and self.use_atomic_alpha and latent_alphas is not None:
             baseline_alphas = self.atomic_alpha(atomic_numbers)

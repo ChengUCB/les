@@ -233,7 +233,7 @@ class Ewald(nn.Module):
         if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
             alpha = alpha.unsqueeze(1)
         if alpha.dim() == 2: # isotropic alpha
-            epsilon_r = alpha / volume / epsilon_0 + 1.
+            epsilon_r = alpha.sum(axis=0) / volume / epsilon_0 + 1.
         elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3): # anisotropic alpha
             epsilon_r = torch.einsum('iqcc->q', alpha) / 3. / volume / epsilon_0 + 1.
         else:
@@ -243,9 +243,9 @@ class Ewald(nn.Module):
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, 
                                     u: Optional[torch.Tensor]=None, 
-                                    kappa:Optional[torch.Tensor]=None, 
-                                    alpha:Optional[torch.Tensor]=None, 
-                                    compute_potential:bool =False, compute_field: bool=False):
+                                    kappa: Optional[torch.Tensor]=None, 
+                                    alpha: Optional[torch.Tensor]=None, 
+                                    compute_potential: bool=False, compute_field: bool=False):
         device = r_raw.device
         if q.dim() == 1:
             one_dim_input = True
@@ -273,10 +273,9 @@ class Ewald(nn.Module):
         # use epsilon_r to scale the potential and field if alpha is provided
         if alpha is not None and hasattr(self, 'use_epsilon_r_scaling') and self.use_epsilon_r_scaling:
             epsilon_r = self._get_epsilon_r(alpha, volume) #[n_q]
+            #print(f"Using epsilon_r scaling with epsilon_r = {epsilon_r}")
         else:
             epsilon_r = torch.ones(n_q, device=device, dtype=r_raw.dtype)
-
-
 
         # max Nk for each axis
         norms = torch.norm(cell_now, dim=1)
@@ -336,9 +335,6 @@ class Ewald(nn.Module):
             if u is not None:
                 pot -= torch.sum(u**2, dim=(0,2)) / ( 3 * self.sigma**3. * self.twopi**1.5) * self.norm_factor
 
-        # scaling!
-        pot = pot / epsilon_r
-
         # for computing electric field or potential
         if compute_field or kappa is not None or alpha is not None:
             #S_k = S_k_real + 1j * S_k_imag
@@ -358,9 +354,6 @@ class Ewald(nn.Module):
             if self.remove_self_interaction:
                 e_phi -= q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor # [n, n_q] 
 
-            # scaling!!!
-            e_phi = e_phi / epsilon_r.unsqueeze(0) # [n, n_q] / [n_q]
-
             if kappa is not None: # compute induced charges
                 q_induced = self._get_induced_q(e_phi, kappa)
                 pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
@@ -379,9 +372,6 @@ class Ewald(nn.Module):
                 c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) / self.twopi * self.norm_factor
                 e_field += c_self * u
 
-            # scaling!!!
-            e_field = e_field / epsilon_r.unsqueeze(0).unsqueeze(2) # [n, n_q, 3] / [n_q]
-
             # compute induced dipoles
             if alpha is not None:
                 u_induced = self._get_induced_u(e_field, alpha)
@@ -394,6 +384,7 @@ class Ewald(nn.Module):
                  'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
                  'phi': e_phi,
                  'field': e_field,
+                 'epsilon_r': epsilon_r,
                  }
         return output
 
