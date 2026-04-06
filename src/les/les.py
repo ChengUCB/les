@@ -40,7 +40,7 @@ class Les(nn.Module):
             else _DummyAtomwise()
         )
 
-        if self.use_fixed_charges:
+        if self.use_fixed_atomic_charges:
             self.fixed_charges = FixedCharges()
         if self.use_atomic_alpha:
             self.atomic_alpha = AtomicAlpha()
