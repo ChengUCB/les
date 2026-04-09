@@ -219,13 +219,13 @@ class Ewald(nn.Module):
         return q_induced
 
     def _get_induced_u(self, e_field, alpha):
+        e_field = e_field + self.e_ext[None,None,:]
         if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
             alpha = alpha.unsqueeze(1)
         if alpha.dim() == 2:
             u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
         elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3):
             # e_field: [n, n_q, 3], alpha: [n, n_q, 3, 3]
-            e_field = e_field + self.e_ext[None,:]
             u_induced = torch.einsum('iqc,iqcd->iqd', e_field, alpha)
         else:
             raise ValueError('alpha dimension error')
