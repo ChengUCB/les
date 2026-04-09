@@ -163,6 +163,7 @@ class Les(nn.Module):
         output = {
             'E_lr': E_lr,
             'latent_charges': latent_charges,
+            'latent_alphas': latent_alphas,
             'latent_dipoles': latent_dipoles,
             'BEC': bec,
             }
