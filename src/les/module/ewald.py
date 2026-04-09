@@ -270,10 +270,8 @@ class Ewald(nn.Module):
         cell_inv = torch.linalg.inv(cell_now)
         G = 2 * torch.pi * cell_inv.T  # Reciprocal lattice vectors [3,3], G = 2π(M^{-1}).T
 
-        # use epsilon_r to scale the potential and field if alpha is provided
         if alpha is not None and hasattr(self, 'use_epsilon_r_scaling') and self.use_epsilon_r_scaling:
             epsilon_r = self._get_epsilon_r(alpha, volume) #[n_q]
-            #print(f"Using epsilon_r scaling with epsilon_r = {epsilon_r}")
         else:
             epsilon_r = torch.ones(n_q, device=device, dtype=r_raw.dtype)
 
