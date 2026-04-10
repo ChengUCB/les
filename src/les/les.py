@@ -68,7 +68,7 @@ class Les(nn.Module):
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', False)
-        self.use_fixed_charges = les_arguments.get('use_fixed_charges', True)
+        self.use_fixed_atomic_charges = les_arguments.get('use_fixed_atomic_charges', False)
 
     def forward(self, 
                positions: torch.Tensor, # [n_atoms, 3]
@@ -115,7 +115,7 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
-        if atomic_numbers is not None and self.use_fixed_charges:
+        if atomic_numbers is not None and hasattr(self, 'use_fixed_atomic_charges') and self.use_fixed_atomic_charges:
             latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
 
         # compute the long-range interactions
