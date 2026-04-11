@@ -276,7 +276,6 @@ class Ewald_vectorized(nn.Module):
         pot_per_batch_double.scatter_add_(0, batch, pot_per_atom_double) # [B]
 
         pot_per_batch = pot_per_batch_double / (self.twopi * 2.0) # [B]
-        norm_factor = 90.0474
 
         if not self.remove_self_interaction:
             q_sq_per_atom = (q ** 2).sum(dim=1)        # [N]
@@ -284,7 +283,7 @@ class Ewald_vectorized(nn.Module):
             self_per_batch.scatter_add_(0, batch, q_sq_per_atom)
             pot_per_batch = pot_per_batch + self_per_batch / (self.sigma * self.twopi ** (3.0 / 2.0))
 
-        return pot_per_batch * norm_factor
+        return pot_per_batch * self.norm_factor
     
 
     def compute_potential_triclinic(self, r, q, cell, batch):
