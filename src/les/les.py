@@ -41,7 +41,7 @@ class Les(nn.Module):
         )
 
         if self.use_fixed_atomic_charges:
-            self.fixed_charges = FixedCharges()
+            self.fixed_charges = FixedCharges(normalization_factor=self.fixed_atomic_charges_scaling_factor)
         if self.use_atomic_alpha:
             self.atomic_alpha = AtomicAlpha()
 
@@ -74,6 +74,7 @@ class Les(nn.Module):
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', False)
         self.use_fixed_atomic_charges = les_arguments.get('use_fixed_atomic_charges', False)
+        self.fixed_atomic_charges_scaling_factor = les_arguments.get('fixed_atomic_charges_scaling_factor', 0.5)
         self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
         self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
