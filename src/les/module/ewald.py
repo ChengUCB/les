@@ -246,66 +246,41 @@ class Ewald_vectorized(nn.Module):
 
 
     def compute_potential_realspace(self, r, q, cell, batch):
-        """
-        Realspace (non-periodic) Ewald, vectorized over a flat pair list.
-        For each batch b, sums over ordered pairs (i,j) with i,j in b and i != j.
-        """
-        device = r.device
-        dtype = r.dtype
-        N = r.shape[0]
+        epsilon = 1e-6
+        r_ij = r.unsqueeze(0) - r.unsqueeze(1)
+        torch.diagonal(r_ij).add_(epsilon)
+        r_ij_norm = torch.norm(r_ij, dim=-1)
+
+        convergence_func_ij = torch.special.erf(r_ij_norm / self.sigma / (2.0 ** 0.5))
+        r_p_ij = 1.0 / (r_ij_norm)
+
+        N, n_q = q.shape
+
+        pot_ijq = (q.unsqueeze(0) * # [1, N, n_q]
+                q.unsqueeze(1) * # [N, 1, n_q]
+                r_p_ij.unsqueeze(2) * # [N, N, 1]
+                convergence_func_ij.unsqueeze(2) # [N, N, 1]
+                ) #-> [N, N, n_q]
+
+        same_batch = batch.unsqueeze(0) == batch.unsqueeze(1)  # [N, N]
+        offdiag = ~torch.eye(N, dtype=torch.bool, device=pot_ijq.device) # [N, N]
+        pair_mask = same_batch & offdiag # [N, N]
+
+        pot_ijq = pot_ijq * pair_mask.unsqueeze(2) # [N, N, n_q]
+
+        pot_per_atom_double = pot_ijq.sum(dim=(1,2)) # [N]
+        
+        # B = batch.max() + 1 # only problem for the torch.compile with fullgraph=True
         B = cell.shape[0]
+        pot_per_batch_double = torch.zeros(B, device=pot_ijq.device, dtype=pot_per_atom_double.dtype) # [B]
+        pot_per_batch_double.scatter_add_(0, batch, pot_per_atom_double) # [B]
 
-        # per-config atom counts and starting offsets:
-        counts = torch.zeros(B, dtype=torch.long, device=device)  # counts[b] = number of atoms in config b
-        counts.scatter_add_(0, batch, torch.ones_like(batch))           # [B]
-        offsets = torch.cumsum(counts, dim=0) - counts  # [B]  # offsets[b] = global index of the first atom in config b
-
-        # for each atom, the size and start of its config
-        counts_per_atom  = counts[batch]                                # [N]
-        offsets_per_atom = offsets[batch]                               # [N]
-
-        # build flat pair index tensors: (using flat pairs gives memory: O(sum_b N_b^2) instead of O(N_total^2))
-        # each atom i contributes counts_per_atom[i] pairs (one for each j in its config).
-        # pair_i: repeat each atom index by its config size.
-        atom_idx = torch.arange(N, device=device)
-        pair_i = atom_idx.repeat_interleave(counts_per_atom)            # [n_pairs]
-
-        # pair_j: for each atom i, j runs over offsets[batch[i]] + [0 .. counts[batch[i]]).
-        # compute "local j" within each atom's block via the segment-arange trick:
-        n_pairs = pair_i.shape[0]
-        pair_idx = torch.arange(n_pairs, device=device)
-        # for atom i, the cumulative pair count BEFORE its block:
-        pairs_before_atom = torch.cumsum(counts_per_atom, dim=0) - counts_per_atom   # [N]
-        # broadcast to per-pair: each pair's "start of its block"
-        block_start_per_pair = pairs_before_atom.repeat_interleave(counts_per_atom)  # [n_pairs]
-        local_j = pair_idx - block_start_per_pair                        # [n_pairs] in [0, N_b)
-        # add the global config offset
-        j_global_offset = offsets_per_atom.repeat_interleave(counts_per_atom)        # [n_pairs]
-        pair_j = j_global_offset + local_j                               # [n_pairs]
-
-        # pair contributions:
-        diff = r[pair_i] - r[pair_j]                                     # [n_pairs, 3]
-        dist = torch.norm(diff, dim=-1).clamp(min=1e-6)                  # [n_pairs]
-        erf_val = torch.special.erf(dist / (self.sigma * (2.0 ** 0.5))) # [n_pairs]
-
-        # inner product over the n_q charge channels
-        qq_pair = (q[pair_i] * q[pair_j]).sum(dim=-1)                    # [n_pairs]
-
-        # drop i==j (this is the only "diagonal" we have to mask now)
-        keep = (pair_i != pair_j).to(dtype)                              # [n_pairs]
-        pot_per_pair = qq_pair * erf_val / dist * keep                   # [n_pairs]
-
-        # scatter back to per-batch totals:
-        pair_batch = batch[pair_i]                                       # [n_pairs]
-        pot_per_batch_double = torch.zeros(B, device=device, dtype=pot_per_pair.dtype)
-        pot_per_batch_double.scatter_add_(0, pair_batch, pot_per_pair)   # [B]
-
-        pot_per_batch = pot_per_batch_double / (self.twopi * 2.0)        # /2 for double-counting, /2π
+        pot_per_batch = pot_per_batch_double / (self.twopi * 2.0) # [B]
         norm_factor = 90.0474
 
         if not self.remove_self_interaction:
             q_sq_per_atom = (q ** 2).sum(dim=1)        # [N]
-            self_per_batch = torch.zeros(B, device=device, dtype=q_sq_per_atom.dtype)
+            self_per_batch = torch.zeros(B, device=pot_ijq.device, dtype=q_sq_per_atom.dtype)
             self_per_batch.scatter_add_(0, batch, q_sq_per_atom)
             pot_per_batch = pot_per_batch + self_per_batch / (self.sigma * self.twopi ** (3.0 / 2.0))
 
