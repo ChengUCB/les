@@ -191,7 +191,7 @@ class Ewald_vectorized(nn.Module):
         self.is_periodic = is_periodic
         self.N_max = N_max
 
-        ### fixed k-grid for non-periodic case, precompute ###
+        ### fixed k-grid for periodic case, precompute ###
         nvec_all = torch.stack(
             torch.meshgrid(
                 torch.arange(-N_max, N_max + 1),
