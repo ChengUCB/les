@@ -43,8 +43,6 @@ class Ewald(nn.Module):
         assert n == q.size(0), 'q dimension error'
         if batch is None:
             batch = torch.zeros(n, dtype=torch.int64, device=r.device)
-        if e_ext is None:
-            e_ext = torch.zeros_like(r[0])
 
         unique_batches = torch.unique(batch)  # Get unique batch indices
 

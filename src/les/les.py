@@ -103,9 +103,6 @@ class Les(nn.Module):
         if batch is None:
             batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)
 
-        if e_ext is None:
-            e_ext = torch.zeros_like(positions[0])
-
         if latent_charges is not None:
             # check the shape of latent charges
             assert latent_charges.shape[0] == positions.shape[0]
