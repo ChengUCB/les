@@ -279,7 +279,7 @@ class Ewald_vectorized(nn.Module):
 
         if not self.remove_self_interaction:
             q_sq_per_atom = (q ** 2).sum(dim=1)        # [N]
-            self_per_batch = torch.zeros(B, device=pot_ijq.device, dtype=q_sq_per_atom.dtype)
+            self_per_batch = torch.zeros(B, device=device, dtype=q_sq_per_atom.dtype)
             self_per_batch.scatter_add_(0, batch, q_sq_per_atom)
             pot_per_batch = pot_per_batch + self_per_batch / (self.sigma * self.twopi ** (3.0 / 2.0))
 
