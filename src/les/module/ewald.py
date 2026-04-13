@@ -191,7 +191,7 @@ class Ewald_vectorized(nn.Module):
         self.is_periodic = is_periodic
         self.N_max = N_max
 
-        ### fixed k-grid for non-periodic case, precompute ###
+        ### fixed k-grid for periodic case, precompute ###
         nvec_all = torch.stack(
             torch.meshgrid(
                 torch.arange(-N_max, N_max + 1),
@@ -246,40 +246,40 @@ class Ewald_vectorized(nn.Module):
 
 
     def compute_potential_realspace(self, r, q, cell, batch):
-        epsilon = 1e-6
-        r_ij = r.unsqueeze(0) - r.unsqueeze(1)
-        torch.diagonal(r_ij).add_(epsilon)
-        r_ij_norm = torch.norm(r_ij, dim=-1)
+        """
+        Realspace (non-periodic) Ewald over an [N, N] pair grid (N = total
+        atoms).
 
-        convergence_func_ij = torch.special.erf(r_ij_norm / self.sigma / (2.0 ** 0.5))
-        r_p_ij = 1.0 / (r_ij_norm)
-
-        N, n_q = q.shape
-
-        pot_ijq = (q.unsqueeze(0) * # [1, N, n_q]
-                q.unsqueeze(1) * # [N, 1, n_q]
-                r_p_ij.unsqueeze(2) * # [N, N, 1]
-                convergence_func_ij.unsqueeze(2) # [N, N, 1]
-                ) #-> [N, N, n_q]
-
-        same_batch = batch.unsqueeze(0) == batch.unsqueeze(1)  # [N, N]
-        offdiag = ~torch.eye(N, dtype=torch.bool, device=pot_ijq.device) # [N, N]
-        pair_mask = same_batch & offdiag # [N, N]
-
-        pot_ijq = pot_ijq * pair_mask.unsqueeze(2) # [N, N, n_q]
-
-        pot_per_atom_double = pot_ijq.sum(dim=(1,2)) # [N]
-        
-        # B = batch.max() + 1 # only problem for the torch.compile with fullgraph=True
+        Masks cross-batch pairs, cost is O(N^2).
+        """
+        device = r.device
+        dtype = r.dtype
+        N = r.shape[0]
         B = cell.shape[0]
-        pot_per_batch_double = torch.zeros(B, device=pot_ijq.device, dtype=pot_per_atom_double.dtype) # [B]
-        pot_per_batch_double.scatter_add_(0, batch, pot_per_atom_double) # [B]
 
-        pot_per_batch = pot_per_batch_double / (self.twopi * 2.0) # [B]
+        idx = torch.arange(N, device=device, dtype=torch.long)
+        pair_i, pair_j = torch.meshgrid(idx, idx, indexing="ij")
+        same_batch = batch[pair_i] == batch[pair_j]
+        pair_j_safe = torch.where(same_batch, pair_j, torch.zeros_like(pair_j))
+
+        diff = r[pair_i] - r[pair_j_safe]                                # [N, N, 3]
+        dist = torch.norm(diff, dim=-1).clamp(min=1e-6)                  # [N, N]
+        erf_val = torch.special.erf(dist / (self.sigma * (2.0 ** 0.5))) # [N, N]
+
+        qq_pair = (q[pair_i] * q[pair_j_safe]).sum(dim=-1)               # [N, N]
+
+        keep = (same_batch & (pair_i != pair_j)).to(dtype)
+        pot_per_pair = qq_pair * erf_val / dist * keep                   # [N, N]
+
+        pair_batch = batch[pair_i]                                       # [N, N]
+        pot_per_batch_double = torch.zeros(B, device=device, dtype=pot_per_pair.dtype)
+        pot_per_batch_double.scatter_add_(0, pair_batch.reshape(-1), pot_per_pair.reshape(-1))
+
+        pot_per_batch = pot_per_batch_double / (self.twopi * 2.0)        # /2 for double-counting, /2π
 
         if not self.remove_self_interaction:
             q_sq_per_atom = (q ** 2).sum(dim=1)        # [N]
-            self_per_batch = torch.zeros(B, device=pot_ijq.device, dtype=q_sq_per_atom.dtype)
+            self_per_batch = torch.zeros(B, device=device, dtype=q_sq_per_atom.dtype)
             self_per_batch.scatter_add_(0, batch, q_sq_per_atom)
             pot_per_batch = pot_per_batch + self_per_batch / (self.sigma * self.twopi ** (3.0 / 2.0))
 
