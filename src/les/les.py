@@ -76,6 +76,7 @@ class Les(nn.Module):
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
                latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
+               latent_quads: Optional[torch.Tensor] = None, # [n_atoms, 3, 3]
                latent_kappas: Optional[torch.Tensor] = None, # [n_atoms, ]
                latent_alphas: Optional[torch.Tensor] = None, # [n_atoms, ]
                atomic_numbers: Optional[torch.Tensor] = None, # [n_atoms, ]
@@ -124,6 +125,7 @@ class Les(nn.Module):
                               u=latent_dipoles,
                               kappa=latent_kappas,
                               alpha=latent_alphas,
+                              quads=latent_quads,
                               r=positions,
                               cell=cell,
                               batch=batch,
