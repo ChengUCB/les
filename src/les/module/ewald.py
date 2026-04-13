@@ -260,7 +260,6 @@ class Ewald(nn.Module):
             if quads.dim() == 3 and quads.shape[1] == 3:
                 quads = quads.unsqueeze(1)
             assert quads.shape == (n_node, n_q, 3, 3), 'quads dimension error'
-            print(quads.shape)
 
         cell_inv = torch.linalg.inv(cell_now)
         G = 2 * torch.pi * cell_inv.T  # Reciprocal lattice vectors [3,3], G = 2π(M^{-1}).T
