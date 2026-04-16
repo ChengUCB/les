@@ -179,6 +179,7 @@ class Les(nn.Module):
             'latent_charges': latent_charges,
             'latent_alphas': latent_alphas,
             'latent_dipoles': latent_dipoles,
+            'latent_quads': latent_quads,
             'latent_alphas': latent_alphas,
             'BEC': bec,
             }
