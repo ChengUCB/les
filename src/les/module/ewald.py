@@ -12,6 +12,7 @@ class Ewald(nn.Module):
                  sigma=1.0,  # width of the Gaussian on each atom
                  remove_self_interaction=True,
                  norm_factor=90.4756,
+                 use_epsilon_r_scaling=False,
                  ):
         super().__init__()
         self.dl = dl
@@ -24,6 +25,7 @@ class Ewald(nn.Module):
         # \epsilon_0 = 5.52635*10^{-3} e^2 eV^{-1} A^{-1}
         self.norm_factor = norm_factor
         self.k_sq_max = (self.twopi / self.dl) ** 2
+        self.use_epsilon_r_scaling = use_epsilon_r_scaling
 
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
@@ -229,6 +231,18 @@ class Ewald(nn.Module):
             raise ValueError('alpha dimension error')
         return u_induced
 
+    def _get_epsilon_r(self, alpha, volume):
+        epsilon_0 = 0.00552635  # e^2 eV^{-1} A^{-1}
+        if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
+            alpha = alpha.unsqueeze(1)
+        if alpha.dim() == 2: # isotropic alpha
+            epsilon_r = alpha.sum(axis=0) / volume / epsilon_0 + 1.
+        elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3): # anisotropic alpha
+            epsilon_r = torch.einsum('iqcc->q', alpha) / 3. / volume / epsilon_0 + 1.
+        else:
+            raise ValueError('alpha dimension error')
+        return epsilon_r
+
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, 
                                     u: Optional[torch.Tensor]=None,
@@ -261,8 +275,14 @@ class Ewald(nn.Module):
                 quads = quads.unsqueeze(1)
             assert quads.shape == (n_node, n_q, 3, 3), 'quads dimension error'
 
+        volume = torch.det(cell_now)
         cell_inv = torch.linalg.inv(cell_now)
         G = 2 * torch.pi * cell_inv.T  # Reciprocal lattice vectors [3,3], G = 2π(M^{-1}).T
+
+        if alpha is not None and hasattr(self, 'use_epsilon_r_scaling') and self.use_epsilon_r_scaling:
+            epsilon_r = self._get_epsilon_r(alpha, volume) #[n_q]
+        else:
+            epsilon_r = torch.ones(n_q, device=device, dtype=r_raw.dtype)
 
         # max Nk for each axis
         norms = torch.norm(cell_now, dim=1)
@@ -321,7 +341,6 @@ class Ewald(nn.Module):
         kfac = torch.exp(-self.sigma_sq_half * k_sq) / k_sq
         
         # Compute potential energy, (2π/volume)* sum(factors * kfac * |S(k)|^2)
-        volume = torch.det(cell_now)
         pot = (factors * kfac * S_k_sq).sum(dim=1) / volume * self.norm_factor # [n_q]
 
         # Remove self-interaction if applicable
@@ -371,7 +390,7 @@ class Ewald(nn.Module):
             if alpha is not None:
                 u_induced = self._get_induced_u(e_field, alpha)
                 pot_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
-                pot += pot_induced                
+                pot += pot_induced
 
         output = {
                  'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
@@ -379,6 +398,7 @@ class Ewald(nn.Module):
                  'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
                  'phi': e_phi,
                  'field': e_field,
+                 'epsilon_r': epsilon_r,
                  }
         return output
 

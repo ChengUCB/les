@@ -7,3 +7,5 @@ from les.module.ewald import *
 from les.module.bec import *
 
 from les.module.fixedcharges import *
+
+from les.module.atomicalpha import *
