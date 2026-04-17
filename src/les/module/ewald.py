@@ -119,8 +119,15 @@ class Ewald(nn.Module):
                 quad = quad.unsqueeze(1)
             assert quad.shape == (n_node, n_q, 3, 3), 'quad dimension error'
 
-        # f_qq [n,n], f_qu [n,n,3], f_uu [n,n,3,3], f_Qu [n,n,3,3,3], f_QQ [n,n,3,3,3,3]
-        f_qq, f_qu, f_uu, f_Qu, f_QQ = make_kernels(r_raw, self.sigma, norm_const)
+        # f_qu/f_uu also feed the charge-induced e_field when compute_field
+        # or alpha is set, so compute_u covers those cases too.
+        compute_u = (u is not None) or compute_field or (alpha is not None)
+        compute_Q = quad is not None
+        f_qq, f_qu, f_uu, f_Qu, f_QQ = make_kernels(
+            r_raw, self.sigma, norm_const,
+            compute_u=compute_u,
+            compute_Q=compute_Q,
+        )
 
         # electric potential at r_j due to q at r_i, sum over i
         e_phi = torch.einsum('iq,ij->jq', q, f_qq)

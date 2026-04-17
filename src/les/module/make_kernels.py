@@ -1,13 +1,18 @@
 import torch
 
-def make_kernels(r, sigma, norm_const):
+def make_kernels(r, sigma, norm_const, compute_u=True, compute_Q=True):
     """
-    Compute the Ewald real-space interaction kernels:
-      f_qq [n,n]            charge-charge
-      f_qu [n,n,3]          charge-dipole
-      f_uu [n,n,3,3]        dipole-dipole
-      f_Qu [n,n,3,3,3]      quadrupole-dipole
-      f_QQ [n,n,3,3,3,3]    quadrupole-quadrupole
+    Compute the Ewald real-space interaction kernels.
+
+      f_qq [n,n]            charge-charge            (always computed)
+      f_qu [n,n,3]          charge-dipole            (if compute_u)
+      f_uu [n,n,3,3]        dipole-dipole            (if compute_u or compute_Q)
+      f_Qu [n,n,3,3,3]      quadrupole-dipole        (if compute_Q)
+      f_QQ [n,n,3,3,3,3]    quadrupole-quadrupole    (if compute_Q)
+
+    Unrequested kernels are returned as None to save compute.
+    f_uu is returned under either flag because the quadrupole energy
+    pot_Qq contracts with f_uu.
     """
     n = r.shape[0]
     a = 1.0 / (sigma * 2.0 ** 0.5)
@@ -21,62 +26,74 @@ def make_kernels(r, sigma, norm_const):
 
     rinv = torch.zeros_like(r_ij_norm)
     rinv[mask_off] = 1.0 / r_ij_norm[mask_off]
-    rinv2 = rinv * rinv
-    rinv3 = rinv2 * rinv
-    rinv4 = rinv3 * rinv
-    rinv5 = rinv4 * rinv
 
-    gauss = torch.exp(-(a * r_ij_norm) ** 2) * mask_off
     erf = torch.zeros_like(r_ij_norm)
     erf[mask_off] = torch.special.erf(r_ij_norm[mask_off] * a)
 
+    f_qq = erf * rinv * norm_const                                                  # [n,n]
+
+    f_qu = None
+    f_uu = None
+    f_Qu = None
+    f_QQ = None
+
+    if not (compute_u or compute_Q):
+        return f_qq, f_qu, f_uu, f_Qu, f_QQ
+
+    rinv2 = rinv * rinv
+    rinv3 = rinv2 * rinv
+    gauss = torch.exp(-(a * r_ij_norm) ** 2) * mask_off
     rhat = r_ij * rinv[..., None]
     eye = torch.eye(3, device=device, dtype=dtype)
 
-    f_qq = erf * rinv * norm_const                                                  # [n,n]
-
+    # s1, s2 feed f_qu, f_uu (and f_Qu, f_QQ via s2)
     s1 = erf * rinv3 - (2.0 * a / sqrt_pi) * gauss * rinv2
     s2 = (3.0 * erf * rinv3
           - (6.0 * a / sqrt_pi) * gauss * rinv2
           - (4.0 * a ** 3 / sqrt_pi) * gauss)
-    # s3 = ds2/dr - 2*s2/r
-    s3 = (-15.0 * erf * rinv4
-          + (30.0 * a / sqrt_pi) * gauss * rinv3
-          + (20.0 * a ** 3 / sqrt_pi) * gauss * rinv
-          + (8.0 * a ** 5 / sqrt_pi) * gauss * r_ij_norm)
-    # s4 = ds3/dr - 3*s3/r
-    s4 = (105.0 * erf * rinv5
-          - (210.0 * a / sqrt_pi) * gauss * rinv4
-          - (140.0 * a ** 3 / sqrt_pi) * gauss * rinv2
-          - (56.0 * a ** 5 / sqrt_pi) * gauss
-          - (16.0 * a ** 7 / sqrt_pi) * gauss * r_ij_norm ** 2)
-
-    f_qu = s1[..., None] * r_ij * norm_const                                        # [n,n,3]
 
     rr = rhat[..., :, None] * rhat[..., None, :]
     f_uu = (s2[:, :, None, None] * rr - s1[:, :, None, None] * eye[None, None]) * norm_const  # [n,n,3,3]
 
-    rrr = torch.einsum('nmi,nmj,nmk->nmijk', rhat, rhat, rhat)
-    term_delta_r = (torch.einsum('ab,ijc->ijabc', eye, rhat)
-                    + torch.einsum('ac,ijb->ijabc', eye, rhat)
-                    + torch.einsum('bc,ija->ijabc', eye, rhat))
-    f_Qu = (s3[..., None, None, None] * rrr
-            + (s2 * rinv)[..., None, None, None] * term_delta_r) * norm_const       # [n,n,3,3,3]
+    if compute_u:
+        f_qu = s1[..., None] * r_ij * norm_const                                    # [n,n,3]
 
-    rrrr = torch.einsum('ija,ijb,ijc,ijd->ijabcd', rhat, rhat, rhat, rhat)
-    term_delta_rr = (torch.einsum('ab,ijc,ijd->ijabcd', eye, rhat, rhat)
-                     + torch.einsum('ac,ijb,ijd->ijabcd', eye, rhat, rhat)
-                     + torch.einsum('ad,ijb,ijc->ijabcd', eye, rhat, rhat)
-                     + torch.einsum('bc,ija,ijd->ijabcd', eye, rhat, rhat)
-                     + torch.einsum('bd,ija,ijc->ijabcd', eye, rhat, rhat)
-                     + torch.einsum('cd,ija,ijb->ijabcd', eye, rhat, rhat))
-    term_delta_delta = (torch.einsum('ab,cd->abcd', eye, eye)
-                        + torch.einsum('ac,bd->abcd', eye, eye)
-                        + torch.einsum('ad,bc->abcd', eye, eye))
-    term_delta_delta = term_delta_delta.unsqueeze(0).unsqueeze(0)
-    f_QQ = (s4[..., None, None, None, None] * rrrr
-            + (s3 * rinv)[..., None, None, None, None] * term_delta_rr
-            + (s2 * rinv2)[..., None, None, None, None] * term_delta_delta) * norm_const  # [n,n,3,3,3,3]
+    if compute_Q:
+        rinv4 = rinv3 * rinv
+        rinv5 = rinv4 * rinv
+        # s3 = ds2/dr - 2*s2/r
+        s3 = (-15.0 * erf * rinv4
+              + (30.0 * a / sqrt_pi) * gauss * rinv3
+              + (20.0 * a ** 3 / sqrt_pi) * gauss * rinv
+              + (8.0 * a ** 5 / sqrt_pi) * gauss * r_ij_norm)
+        # s4 = ds3/dr - 3*s3/r
+        s4 = (105.0 * erf * rinv5
+              - (210.0 * a / sqrt_pi) * gauss * rinv4
+              - (140.0 * a ** 3 / sqrt_pi) * gauss * rinv2
+              - (56.0 * a ** 5 / sqrt_pi) * gauss
+              - (16.0 * a ** 7 / sqrt_pi) * gauss * r_ij_norm ** 2)
+
+        rrr = torch.einsum('nmi,nmj,nmk->nmijk', rhat, rhat, rhat)
+        term_delta_r = (torch.einsum('ab,ijc->ijabc', eye, rhat)
+                        + torch.einsum('ac,ijb->ijabc', eye, rhat)
+                        + torch.einsum('bc,ija->ijabc', eye, rhat))
+        f_Qu = (s3[..., None, None, None] * rrr
+                + (s2 * rinv)[..., None, None, None] * term_delta_r) * norm_const   # [n,n,3,3,3]
+
+        rrrr = torch.einsum('ija,ijb,ijc,ijd->ijabcd', rhat, rhat, rhat, rhat)
+        term_delta_rr = (torch.einsum('ab,ijc,ijd->ijabcd', eye, rhat, rhat)
+                         + torch.einsum('ac,ijb,ijd->ijabcd', eye, rhat, rhat)
+                         + torch.einsum('ad,ijb,ijc->ijabcd', eye, rhat, rhat)
+                         + torch.einsum('bc,ija,ijd->ijabcd', eye, rhat, rhat)
+                         + torch.einsum('bd,ija,ijc->ijabcd', eye, rhat, rhat)
+                         + torch.einsum('cd,ija,ijb->ijabcd', eye, rhat, rhat))
+        term_delta_delta = (torch.einsum('ab,cd->abcd', eye, eye)
+                            + torch.einsum('ac,bd->abcd', eye, eye)
+                            + torch.einsum('ad,bc->abcd', eye, eye))
+        term_delta_delta = term_delta_delta.unsqueeze(0).unsqueeze(0)
+        f_QQ = (s4[..., None, None, None, None] * rrrr
+                + (s3 * rinv)[..., None, None, None, None] * term_delta_rr
+                + (s2 * rinv2)[..., None, None, None, None] * term_delta_delta) * norm_const  # [n,n,3,3,3,3]
 
     return f_qq, f_qu, f_uu, f_Qu, f_QQ
 

@@ -54,7 +54,7 @@ def test_f_qu_large_a_limit(r_raw):
     """f_qu -> -nc * T1  as sigma -> 0."""
     sigma, nc = _setup_small_sigma()
     r = r_raw.double()
-    _, f_qu, _, _, _ = make_kernels(r, sigma, nc)
+    _, f_qu, _, _, _ = make_kernels(r, sigma, nc, compute_u=True, compute_Q=False)
     T1, _, _, _     = bare_multipole_tensors(r)
 
     expected = -T1 * nc  # f_qu = nc * r̂/r^2,  T1 = -r̂/r^2
@@ -67,7 +67,7 @@ def test_f_uu_large_a_limit(r_raw):
     """f_uu -> +nc * T2  as sigma -> 0."""
     sigma, nc = _setup_small_sigma()
     r = r_raw.double()
-    _, _, f_uu, _, _ = make_kernels(r, sigma, nc)
+    _, _, f_uu, _, _ = make_kernels(r, sigma, nc, compute_u=True, compute_Q=False)
     _, T2, _, _     = bare_multipole_tensors(r)
 
     expected = T2 * nc
@@ -80,7 +80,7 @@ def test_f_Qu_large_a_limit(r_raw):
     """f_Qu -> +nc * T3  as sigma -> 0."""
     sigma, nc = _setup_small_sigma()
     r = r_raw.double()
-    _, _, _, f_Qu, _ = make_kernels(r, sigma, nc)
+    _, _, _, f_Qu, _ = make_kernels(r, sigma, nc, compute_u=False, compute_Q=True)
     _, _, T3, _     = bare_multipole_tensors(r)
 
     expected = T3 * nc
@@ -93,7 +93,7 @@ def test_f_QQ_large_a_limit(r_raw):
     """f_QQ -> +nc * T4  as sigma -> 0."""
     sigma, nc = _setup_small_sigma()
     r = r_raw.double()
-    _, _, _, _, f_QQ = make_kernels(r, sigma, nc)
+    _, _, _, _, f_QQ = make_kernels(r, sigma, nc, compute_u=False, compute_Q=True)
     _, _, _, T4     = bare_multipole_tensors(r)
 
     expected = T4 * nc

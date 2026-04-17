@@ -41,12 +41,13 @@ def _setup(sigma=2.0):
 # ─────────────────────────────────────────────────────────────────────────────
 def test_f_qu_is_autograd_derivative_of_f_qq(r_raw):
     sigma, nc = _setup()
+    kw = dict(compute_u=True, compute_Q=False)
 
-    _, f_qu_analytical, _, _, _ = make_kernels(r_raw, sigma, nc)
+    _, f_qu_analytical, _, _, _ = make_kernels(r_raw, sigma, nc, **kw)
 
     r_grad = r_raw.clone().requires_grad_(True)
     jac = torch.autograd.functional.jacobian(
-        lambda r: make_kernels(r, sigma, nc)[0], r_grad)  # [n,n, n,3]
+        lambda r: make_kernels(r, sigma, nc, **kw)[0], r_grad)  # [n,n, n,3]
 
     n = r_raw.shape[0]
     max_err_j = max_err_i = 0.0
@@ -68,12 +69,13 @@ def test_f_qu_is_autograd_derivative_of_f_qq(r_raw):
 # ─────────────────────────────────────────────────────────────────────────────
 def test_f_uu_is_autograd_derivative_of_f_qu(r_raw):
     sigma, nc = _setup()
+    kw = dict(compute_u=True, compute_Q=False)
 
-    _, _, f_uu_analytical, _, _ = make_kernels(r_raw, sigma, nc)
+    _, _, f_uu_analytical, _, _ = make_kernels(r_raw, sigma, nc, **kw)
 
     r_grad = r_raw.clone().requires_grad_(True)
     jac = torch.autograd.functional.jacobian(
-        lambda r: make_kernels(r, sigma, nc)[1], r_grad)  # [n,n,3, n,3]
+        lambda r: make_kernels(r, sigma, nc, **kw)[1], r_grad)  # [n,n,3, n,3]
 
     n = r_raw.shape[0]
     max_err_j = max_err_i = 0.0
@@ -95,12 +97,13 @@ def test_f_uu_is_autograd_derivative_of_f_qu(r_raw):
 # ─────────────────────────────────────────────────────────────────────────────
 def test_f_Qu_is_autograd_derivative_of_f_uu(r_raw):
     sigma, nc = _setup()
+    kw = dict(compute_u=False, compute_Q=True)
 
-    _, _, _, f_Qu_analytical, _ = make_kernels(r_raw, sigma, nc)
+    _, _, _, f_Qu_analytical, _ = make_kernels(r_raw, sigma, nc, **kw)
 
     r_grad = r_raw.clone().requires_grad_(True)
     jac = torch.autograd.functional.jacobian(
-        lambda r: make_kernels(r, sigma, nc)[2], r_grad)  # [n,n,3,3, n,3]
+        lambda r: make_kernels(r, sigma, nc, **kw)[2], r_grad)  # [n,n,3,3, n,3]
 
     n = r_raw.shape[0]
     max_err_j = max_err_i = 0.0
@@ -122,12 +125,13 @@ def test_f_Qu_is_autograd_derivative_of_f_uu(r_raw):
 # ─────────────────────────────────────────────────────────────────────────────
 def test_f_QQ_is_autograd_derivative_of_f_Qu(r_raw):
     sigma, nc = _setup()
+    kw = dict(compute_u=False, compute_Q=True)
 
-    _, _, _, _, f_QQ_analytical = make_kernels(r_raw, sigma, nc)
+    _, _, _, _, f_QQ_analytical = make_kernels(r_raw, sigma, nc, **kw)
 
     r_grad = r_raw.clone().requires_grad_(True)
     jac = torch.autograd.functional.jacobian(
-        lambda r: make_kernels(r, sigma, nc)[3], r_grad)  # [n,n,3,3,3, n,3]
+        lambda r: make_kernels(r, sigma, nc, **kw)[3], r_grad)  # [n,n,3,3,3, n,3]
 
     n = r_raw.shape[0]
     max_err_j = max_err_i = 0.0
