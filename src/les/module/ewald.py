@@ -33,6 +33,7 @@ class Ewald(nn.Module):
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
+                quads: Optional[torch.Tensor] = None, # [natoms,3,3]
                 kappa: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms]
                 alpha: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms, n_q, 3, 3] or [n_atoms] or [n_atoms, 3, 3]
                 compute_field: bool = False
@@ -56,6 +57,7 @@ class Ewald(nn.Module):
             r_raw_now, q_now = r[mask], q[mask]
 
             u_now = u[mask] if u is not None else None
+            quads_now = quads[mask] if quads is not None else None
             kappa_now = kappa[mask] if kappa is not None else None
             alpha_now = alpha[mask] if alpha is not None else None
             box_now = cell[i] if cell is not None else None # Get the box for the i-th configuration
@@ -69,8 +71,9 @@ class Ewald(nn.Module):
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
+                # quads implemented for periodic only currently
                 result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, 
-                                                          cell_now=box_now, u=u_now, 
+                                                          cell_now=box_now, u=u_now, quads=quads_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
@@ -242,10 +245,11 @@ class Ewald(nn.Module):
 
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, 
-                                    u: Optional[torch.Tensor]=None, 
-                                    kappa: Optional[torch.Tensor]=None, 
-                                    alpha: Optional[torch.Tensor]=None, 
-                                    compute_potential: bool=False, compute_field: bool=False):
+                                    u: Optional[torch.Tensor]=None,
+                                    quads: Optional[torch.Tensor]=None, 
+                                    kappa:Optional[torch.Tensor]=None, 
+                                    alpha:Optional[torch.Tensor]=None, 
+                                    compute_potential:bool =False, compute_field: bool=False):
         device = r_raw.device
         if q.dim() == 1:
             one_dim_input = True
@@ -265,6 +269,11 @@ class Ewald(nn.Module):
             if u.dim() == 2 and u.shape[1] == 3:
                 u = u.unsqueeze(1)
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
+
+        if quads is not None:
+            if quads.dim() == 3 and quads.shape[1] == 3:
+                quads = quads.unsqueeze(1)
+            assert quads.shape == (n_node, n_q, 3, 3), 'quads dimension error'
 
         volume = torch.det(cell_now)
         cell_inv = torch.linalg.inv(cell_now)
@@ -318,6 +327,13 @@ class Ewald(nn.Module):
             S_k_real = S_k_real + S_k_real_u
             S_k_imag_u = (uk * cos_kr.unsqueeze(1)).sum(dim=0)
             S_k_imag = S_k_imag + S_k_imag_u
+
+        if quads is not None:
+            qk2 = torch.einsum("mi,ncij,mj->ncm",kvec,quads,kvec)
+            S_k_real_Q = -0.5 * (qk2 * cos_kr.unsqueeze(1)).sum(dim=0)
+            S_k_real = S_k_real + S_k_real_Q
+            S_k_imag_Q = -0.5 * (qk2 * sin_kr.unsqueeze(1)).sum(dim=0)
+            S_k_imag = S_k_imag + S_k_imag_Q
         
         S_k_sq = S_k_real**2 + S_k_imag**2  # [n_q, M]
 
