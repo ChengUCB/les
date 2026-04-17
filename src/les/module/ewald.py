@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from itertools import product
 from typing import Dict, Optional, Tuple, List
-import numpy as np
+
+from les.module.make_kernels import make_kernels
 
 __all__ = ['Ewald']
 
@@ -33,7 +34,7 @@ class Ewald(nn.Module):
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
-                quads: Optional[torch.Tensor] = None, # [natoms,3,3]
+                quad: Optional[torch.Tensor] = None, # [natoms,3,3]
                 kappa: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms]
                 alpha: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms, n_q, 3, 3] or [n_atoms] or [n_atoms, 3, 3]
                 compute_field: bool = False
@@ -57,7 +58,7 @@ class Ewald(nn.Module):
             r_raw_now, q_now = r[mask], q[mask]
 
             u_now = u[mask] if u is not None else None
-            quads_now = quads[mask] if quads is not None else None
+            quad_now = quad[mask] if quad is not None else None
             kappa_now = kappa[mask] if kappa is not None else None
             alpha_now = alpha[mask] if alpha is not None else None
             box_now = cell[i] if cell is not None else None # Get the box for the i-th configuration
@@ -65,15 +66,15 @@ class Ewald(nn.Module):
             # check if the box is periodic or not
             if box_now is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
-                result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, u=u_now, 
-                                                          kappa=kappa_now, alpha=alpha_now, 
+                result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, u=u_now,
+                                                          quad=quad_now,
+                                                          kappa=kappa_now, alpha=alpha_now,
                                                           compute_field=compute_field
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
-                # quads implemented for periodic only currently
                 result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, 
-                                                          cell_now=box_now, u=u_now, quads=quads_now, 
+                                                          cell_now=box_now, u=u_now, quad=quad_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
@@ -83,10 +84,11 @@ class Ewald(nn.Module):
 
         return torch.cat(results), torch.cat(q_induced_results), torch.cat(u_induced_results)
 
-    def compute_potential_realspace(self, r_raw, q, 
-                                    u: Optional[torch.Tensor]=None, 
-                                    kappa: Optional[torch.Tensor]=None, 
-                                    alpha: Optional[torch.Tensor]=None, 
+    def compute_potential_realspace(self, r_raw, q,
+                                    u: Optional[torch.Tensor]=None,
+                                    quad: Optional[torch.Tensor]=None,
+                                    kappa: Optional[torch.Tensor]=None,
+                                    alpha: Optional[torch.Tensor]=None,
                                     compute_field: bool=False):
 
         # this is 1/(4pi epsilon_0)
@@ -111,100 +113,84 @@ class Ewald(nn.Module):
                 u = u.unsqueeze(1)
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
-        # mask out self terms cleanly
-        mask_off = ~torch.eye(n_node, dtype=torch.bool, device=device)
+        if quad is not None:
+            quad = quad.to(r_raw.dtype)
+            if quad.dim() == 3 and quad.shape[1] == 3:
+                quad = quad.unsqueeze(1)
+            assert quad.shape == (n_node, n_q, 3, 3), 'quad dimension error'
 
-        # r_ij[i,j] = r_raw[0,j] - r_raw[i,0] = r_j - r_i
-        r_ij = r_raw.unsqueeze(0) - r_raw.unsqueeze(1) # [n_node, n_node, 3]
-        r_ij_norm = torch.norm(r_ij, dim=-1) # [n_node, n_node], pairwise distance
-        rinv = torch.zeros_like(r_ij_norm) # inverse distance
-        rinv[mask_off] = 1.0 / r_ij_norm[mask_off]
-        rinv2 = rinv * rinv
-        rinv3 = rinv2 * rinv
+        # f_qq [n,n], f_qu [n,n,3], f_uu [n,n,3,3], f_Qu [n,n,3,3,3], f_QQ [n,n,3,3,3,3]
+        f_qq, f_qu, f_uu, f_Qu, f_QQ = make_kernels(r_raw, self.sigma, norm_const)
 
-        a = 1.0 / (self.sigma * (2.0 ** 0.5))         # 1/(sqrt(2)*sigma)
-        # Error function scaling for long-range interactions
-        erf = torch.zeros_like(r_ij_norm)
-        erf[mask_off] = torch.special.erf(r_ij_norm[mask_off] * a) # the s0 term
-
-        # charge-charge kernel, diagonal terms are zero
-        f_qq = (erf * rinv * norm_const).to(r_raw.dtype) # [n_node, n_node]
         # electric potential at r_j due to q at r_i, sum over i
-        e_phi = torch.einsum('iq,ij->jq', q, f_qq) # [n_node, n_q]
-        pot = 0.5 * torch.einsum('iq,iq->q', e_phi, q) # [n_q], potential energy
-
-        # charge-dipole kernel
-        if compute_field or u is not None or alpha is not None:
-            gauss = torch.exp(-(a * r_ij_norm) ** 2) * mask_off
-            # this is actually the s1/r3 term
-            s1 = erf * rinv3 - (2.0 * a / (torch.pi ** 0.5)) * gauss * rinv2 # [n_node, n_node]
-            # f_qu[i, j] * q_i computes the electric field at r_j due to q at r_i
-            # f_qu[i, j] * u_i is also equal to the potential at r_j due to u at r_i
-            f_qu = s1.unsqueeze(2) * r_ij * norm_const # ij\alpha = [n_node, n_node, 3]
-        else: # for torchscript compatibility
-            f_qu = torch.zeros((n_node, n_node, 3), device=device, dtype=r_raw.dtype)
-            gauss = torch.zeros_like(r_ij_norm)
-            s1 = torch.zeros_like(r_ij_norm)
-
+        e_phi = torch.einsum('iq,ij->jq', q, f_qq)
+        pot = 0.5 * torch.einsum('iq,iq->q', e_phi, q)
 
         if u is not None:
-            # pot_qu = - torch.einsum('iq,ijc,jqc->q', q, f_qu, u) # - E * u
-            e_phi_u = torch.einsum('iqc,ijc->jq', u, f_qu) # [n_node, n_q]
+            e_phi_u = torch.einsum('iqc,ijc->jq', u, f_qu)
             e_phi = e_phi + e_phi_u
-            pot_qu = torch.einsum('iq,iq->q', e_phi_u, q) # [n_q]
+            pot_qu = torch.einsum('iq,iq->q', e_phi_u, q)
             pot += pot_qu
 
-            # dipole-dipole kernel for f(r)=erf(ar)/r
-            s2 = 3.0 * erf * rinv3 \
-                - (6.0 * a / torch.pi**0.5) * gauss * rinv2 \
-                - (4.0 * a**3 / torch.pi**0.5) * gauss
-            rhat = r_ij * rinv[..., None]
-            outer = rhat[..., :, None] * rhat[..., None, :] # [n,n,3,3]
-            f_uu_1 = s2[:, :, None, None] * outer # ij\alpha\beta = [node, node, 3 , 3] 
-            I3 = torch.eye(3, device=device, dtype=r_raw.dtype)[None, None, :, :]      # [1,1,3,3]
-            f_uu_2 = - s1[:, :, None, None] * I3 
-            # f_uu[i,j,...] is for the electric field at r_j due to u_i at r_i  
-            f_uu = (f_uu_1 + f_uu_2) * norm_const
-            pot_uu = -0.5 * torch.einsum('iqc,ijcd,jqd->q', u, f_uu, u)
+            # field at j induced by dipoles at all i (kernel excludes i=j via mask_off)
+            E_u = torch.einsum('ijcd,iqc->jqd', f_uu, u)
+            pot_uu = -0.5 * torch.einsum('iqc,iqc->q', u, E_u)
             pot += pot_uu
-        else: # for torchscript compatibility
-            f_uu = torch.zeros((n_node, n_node, 3, 3), device=device, dtype=r_raw.dtype)
-            
+        else:  # for torchscript compatibility
+            E_u = torch.zeros((n_node, n_q, 3), device=device, dtype=r_raw.dtype)
+
+        if quad is not None:
+            # potential and field at j induced by quadrupoles at all i
+            # (sign convention matches the triclinic structure factor S_Q = -(1/2)(k·Q·k))
+            e_phi_Q = 0.5 * torch.einsum('iqab,ijab->jq', quad, f_uu)
+            E_Q = -0.5 * torch.einsum('iqab,ijabc->jqc', quad, f_Qu)
+            e_phi = e_phi + e_phi_Q
+
+            pot_Qq = torch.einsum('iq,iq->q', q, e_phi_Q)
+            pot_QQ = 0.125 * torch.einsum('iqab,ijabcd,jqcd->q', quad, f_QQ, quad)
+            pot = pot + pot_Qq + pot_QQ
+            if u is not None:
+                pot_Qu = -torch.einsum('iqc,iqc->q', u, E_Q)
+                pot = pot + pot_Qu
+        else:  # for torchscript compatibility
+            E_Q = torch.zeros((n_node, n_q, 3), device=device, dtype=r_raw.dtype)
 
         # because this realspace sum already removed self-interaction, we need to add it back if needed
+        # note this is the *opposite* behavior of triclinic -- triclinic gets the self-interaction automatically
         if not self.remove_self_interaction:
             pot += (q ** 2).sum(dim=0) / (self.sigma * self.twopi**1.5) * self.norm_factor
-            e_phi += q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor  # [n, n_q]
+            e_phi = e_phi + q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor
             if u is not None:
                 pot += (u**2).sum(dim=(0,2)) / ( 3 * self.sigma**3. * self.twopi**1.5) * self.norm_factor
+                a = 1.0 / (self.sigma * (2.0 ** 0.5))
+                c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) * norm_const
+                E_u = E_u - c_self * u
+            if quad is not None:
+                pot += (quad**2).sum(dim=(0,2,3)) / (10 * self.sigma**5. * self.twopi**1.5) * self.norm_factor
 
         # for computing induced charges
         if kappa is not None:
             q_induced = self._get_induced_q(e_phi, kappa)
-            pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0) # [n_q]
+            pot_induced = 0.5 * (e_phi * q_induced).sum(dim=0)
             pot += pot_induced
 
         # for computing electric field
         if compute_field or alpha is not None:
-            e_field = torch.einsum('iq,ijc->jqc', q, f_qu) # [n, n_q, 3]
+            e_field = torch.einsum('iq,ijc->jqc', q, f_qu)
 
             if u is not None:
-                # Field from dipoles: E_u_j = sum_i (T_ij * u_i)
-                # f_uu is the Hessian [n, n, 3, 3]
-                E_u = torch.einsum('ijcd,iqc->jqd', f_uu, u)  # [n, n_q, 3]
-                if not self.remove_self_interaction: 
-                    c_self = (4.0 / (3.0 * torch.pi**0.5)) * (a**3) * norm_const
-                    E_u = E_u - c_self * u
                 e_field = e_field + E_u
 
-            # compute induced dipoles
+            if quad is not None:
+                e_field = e_field + E_Q
+
             if alpha is not None:
                 u_induced = self._get_induced_u(e_field, alpha)
-                pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
+                pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2))
                 pot += pot_u_induced
 
         output = {
-                 'pot': pot.sum().view(-1), # sum over the energy contributions from different nq channels
+                 'pot': pot.sum().view(-1),
                  'q_induced': q_induced.squeeze(dim=1) if one_dim_input else q_induced,
                  'u_induced': u_induced.squeeze(dim=1) if one_dim_input else u_induced,
                  'phi': e_phi,
@@ -246,7 +232,7 @@ class Ewald(nn.Module):
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, 
                                     u: Optional[torch.Tensor]=None,
-                                    quads: Optional[torch.Tensor]=None, 
+                                    quad: Optional[torch.Tensor]=None, 
                                     kappa:Optional[torch.Tensor]=None, 
                                     alpha:Optional[torch.Tensor]=None, 
                                     compute_potential:bool =False, compute_field: bool=False):
@@ -270,10 +256,10 @@ class Ewald(nn.Module):
                 u = u.unsqueeze(1)
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
-        if quads is not None:
-            if quads.dim() == 3 and quads.shape[1] == 3:
-                quads = quads.unsqueeze(1)
-            assert quads.shape == (n_node, n_q, 3, 3), 'quads dimension error'
+        if quad is not None:
+            if quad.dim() == 3 and quad.shape[1] == 3:
+                quad = quad.unsqueeze(1)
+            assert quad.shape == (n_node, n_q, 3, 3), 'quad dimension error'
 
         volume = torch.det(cell_now)
         cell_inv = torch.linalg.inv(cell_now)
@@ -328,8 +314,8 @@ class Ewald(nn.Module):
             S_k_imag_u = (uk * cos_kr.unsqueeze(1)).sum(dim=0)
             S_k_imag = S_k_imag + S_k_imag_u
 
-        if quads is not None:
-            qk2 = torch.einsum("mi,ncij,mj->ncm",kvec,quads,kvec)
+        if quad is not None:
+            qk2 = torch.einsum("mi,ncij,mj->ncm",kvec,quad,kvec)
             S_k_real_Q = -0.5 * (qk2 * cos_kr.unsqueeze(1)).sum(dim=0)
             S_k_real = S_k_real + S_k_real_Q
             S_k_imag_Q = -0.5 * (qk2 * sin_kr.unsqueeze(1)).sum(dim=0)
