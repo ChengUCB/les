@@ -141,7 +141,7 @@ class Les(nn.Module):
                               u=latent_dipoles,
                               kappa=latent_kappas,
                               alpha=latent_alphas,
-                              quads=latent_quads,
+                              quad=latent_quads,
                               r=positions,
                               cell=cell,
                               batch=batch,
