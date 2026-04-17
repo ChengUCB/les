@@ -33,7 +33,7 @@ class Ewald(nn.Module):
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
                 u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [natoms, 3]
-                quads: Optional[torch.Tensor] = None, # [natoms,3,3]
+                quad: Optional[torch.Tensor] = None, # [natoms,3,3]
                 kappa: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms]
                 alpha: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms, n_q, 3, 3] or [n_atoms] or [n_atoms, 3, 3]
                 compute_field: bool = False
@@ -57,7 +57,7 @@ class Ewald(nn.Module):
             r_raw_now, q_now = r[mask], q[mask]
 
             u_now = u[mask] if u is not None else None
-            quads_now = quads[mask] if quads is not None else None
+            quad_now = quad[mask] if quad is not None else None
             kappa_now = kappa[mask] if kappa is not None else None
             alpha_now = alpha[mask] if alpha is not None else None
             box_now = cell[i] if cell is not None else None # Get the box for the i-th configuration
@@ -65,15 +65,17 @@ class Ewald(nn.Module):
             # check if the box is periodic or not
             if box_now is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
+                if quad_now is not None:
+                    raise NotImplementedError('quad is not implemented for non-periodic case')
                 result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, u=u_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
-                # quads implemented for periodic only currently
+                # quadrupoles implemented for periodic only currently
                 result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, 
-                                                          cell_now=box_now, u=u_now, quads=quads_now, 
+                                                          cell_now=box_now, u=u_now, quad=quad_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
                                                           compute_field=compute_field
                                                           )
@@ -246,7 +248,7 @@ class Ewald(nn.Module):
     # Triclinic box(could be orthorhombic)
     def compute_potential_triclinic(self, r_raw, q, cell_now, 
                                     u: Optional[torch.Tensor]=None,
-                                    quads: Optional[torch.Tensor]=None, 
+                                    quad: Optional[torch.Tensor]=None, 
                                     kappa:Optional[torch.Tensor]=None, 
                                     alpha:Optional[torch.Tensor]=None, 
                                     compute_potential:bool =False, compute_field: bool=False):
@@ -270,10 +272,10 @@ class Ewald(nn.Module):
                 u = u.unsqueeze(1)
             assert u.shape == (n_node, n_q, 3), 'u dimension error'
 
-        if quads is not None:
-            if quads.dim() == 3 and quads.shape[1] == 3:
-                quads = quads.unsqueeze(1)
-            assert quads.shape == (n_node, n_q, 3, 3), 'quads dimension error'
+        if quad is not None:
+            if quad.dim() == 3 and quad.shape[1] == 3:
+                quad = quad.unsqueeze(1)
+            assert quad.shape == (n_node, n_q, 3, 3), 'quad dimension error'
 
         volume = torch.det(cell_now)
         cell_inv = torch.linalg.inv(cell_now)
@@ -328,8 +330,8 @@ class Ewald(nn.Module):
             S_k_imag_u = (uk * cos_kr.unsqueeze(1)).sum(dim=0)
             S_k_imag = S_k_imag + S_k_imag_u
 
-        if quads is not None:
-            qk2 = torch.einsum("mi,ncij,mj->ncm",kvec,quads,kvec)
+        if quad is not None:
+            qk2 = torch.einsum("mi,ncij,mj->ncm",kvec, quad, kvec)
             S_k_real_Q = -0.5 * (qk2 * cos_kr.unsqueeze(1)).sum(dim=0)
             S_k_real = S_k_real + S_k_real_Q
             S_k_imag_Q = -0.5 * (qk2 * sin_kr.unsqueeze(1)).sum(dim=0)

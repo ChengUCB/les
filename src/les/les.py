@@ -141,7 +141,7 @@ class Les(nn.Module):
                               u=latent_dipoles,
                               kappa=latent_kappas,
                               alpha=latent_alphas,
-                              quads=latent_quads,
+                              quad=latent_quads,
                               r=positions,
                               cell=cell,
                               batch=batch,
@@ -177,7 +177,6 @@ class Les(nn.Module):
         output = {
             'E_lr': E_lr,
             'latent_charges': latent_charges,
-            'latent_alphas': latent_alphas,
             'latent_dipoles': latent_dipoles,
             'latent_quads': latent_quads,
             'latent_alphas': latent_alphas,
