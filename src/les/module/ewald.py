@@ -341,6 +341,8 @@ class Ewald(nn.Module):
             pot -= torch.sum(q**2, dim=0) / (self.sigma * self.twopi**1.5) * self.norm_factor
             if u is not None:
                 pot -= torch.sum(u**2, dim=(0,2)) / ( 3 * self.sigma**3. * self.twopi**1.5) * self.norm_factor
+            if quad is not None:
+                pot -= torch.sum(quad**2, dim=(0,2,3)) / (10 * self.sigma**5. * self.twopi**1.5) * self.norm_factor
 
         # for computing electric field or potential
         if compute_field or kappa is not None or alpha is not None:
