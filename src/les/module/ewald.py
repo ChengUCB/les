@@ -37,6 +37,7 @@ class Ewald(nn.Module):
                 quad: Optional[torch.Tensor] = None, # [natoms,3,3]
                 kappa: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms]
                 alpha: Optional[torch.Tensor] = None, # [n_atoms, n_q] or [n_atoms, n_q, 3, 3] or [n_atoms] or [n_atoms, 3, 3]
+                e_ext: Optional[torch.Tensor] = None,
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         
@@ -70,14 +71,16 @@ class Ewald(nn.Module):
                                                           quad=quad_now,
                                                           kappa=kappa_now, 
                                                           alpha=alpha_now,
-                                                          compute_field=compute_field
+                                                          compute_field=compute_field,
+                                                          e_ext=e_ext,
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
                 result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, 
                                                           cell_now=box_now, u=u_now, quad=quad_now, 
                                                           kappa=kappa_now, alpha=alpha_now, 
-                                                          compute_field=compute_field
+                                                          compute_field=compute_field,
+                                                          e_ext=e_ext,
                                                           )
             results.append(result['pot'])
             q_induced_results.append(result['q_induced'])
@@ -90,7 +93,9 @@ class Ewald(nn.Module):
                                     quad: Optional[torch.Tensor]=None,
                                     kappa: Optional[torch.Tensor]=None,
                                     alpha: Optional[torch.Tensor]=None,
-                                    compute_field: bool=False):
+                                    compute_field: bool=False,
+                                    e_ext: Optional[torch.Tensor]=None
+                                    ):
 
         # this is 1/(4pi epsilon_0)
         norm_const = self.norm_factor / self.twopi
@@ -193,8 +198,8 @@ class Ewald(nn.Module):
                 e_field = e_field + E_Q
 
             if alpha is not None:
-                u_induced = self._get_induced_u(e_field, alpha)
-                pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2))
+                u_induced = self._get_induced_u(e_field, alpha, e_ext)
+                pot_u_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_u_induced
 
         output = {
@@ -213,7 +218,9 @@ class Ewald(nn.Module):
         q_induced = - kappa * e_phi # [n, n_q]
         return q_induced
 
-    def _get_induced_u(self, e_field, alpha):
+    def _get_induced_u(self, e_field, alpha, e_ext: Optional[torch.Tensor]=None):
+        if e_ext is not None:
+            e_field = e_field + e_ext[None,None,:]
         if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
             alpha = alpha.unsqueeze(1)
         if alpha.dim() == 2:
@@ -243,7 +250,9 @@ class Ewald(nn.Module):
                                     quad: Optional[torch.Tensor]=None, 
                                     kappa:Optional[torch.Tensor]=None, 
                                     alpha:Optional[torch.Tensor]=None, 
-                                    compute_potential:bool =False, compute_field: bool=False):
+                                    compute_potential:bool =False, 
+                                    compute_field: bool=False,
+                                    e_ext: Optional[torch.Tensor]=None):
         device = r_raw.device
         if q.dim() == 1:
             one_dim_input = True
@@ -384,7 +393,7 @@ class Ewald(nn.Module):
 
             # compute induced dipoles
             if alpha is not None:
-                u_induced = self._get_induced_u(e_field, alpha)
+                u_induced = self._get_induced_u(e_field, alpha, e_ext)
                 pot_induced = - 0.5 * (e_field * u_induced).sum(dim=(0,2)) # [n_q]
                 pot += pot_induced
 
