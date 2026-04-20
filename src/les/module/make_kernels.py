@@ -61,11 +61,11 @@ def make_kernels(r, sigma, norm_const, compute_u=True, compute_Q=True):
     if compute_Q:
         rinv4 = rinv3 * rinv
         rinv5 = rinv4 * rinv
-        # s3 = ds2/dr - 2*s2/r
-        s3 = (-15.0 * erf * rinv4
-              + (30.0 * a / sqrt_pi) * gauss * rinv3
-              + (20.0 * a ** 3 / sqrt_pi) * gauss * rinv
-              + (8.0 * a ** 5 / sqrt_pi) * gauss * r_ij_norm)
+        # s3 = 2*s2/r - ds2/dr  (sign chosen so all radial coefficients lead with +erf)
+        s3 = (15.0 * erf * rinv4
+              - (30.0 * a / sqrt_pi) * gauss * rinv3
+              - (20.0 * a ** 3 / sqrt_pi) * gauss * rinv
+              - (8.0 * a ** 5 / sqrt_pi) * gauss * r_ij_norm)
         # s4 = ds3/dr - 3*s3/r
         s4 = (105.0 * erf * rinv5
               - (210.0 * a / sqrt_pi) * gauss * rinv4
@@ -78,7 +78,7 @@ def make_kernels(r, sigma, norm_const, compute_u=True, compute_Q=True):
                         + torch.einsum('ac,ijb->ijabc', eye, rhat)
                         + torch.einsum('bc,ija->ijabc', eye, rhat))
         f_Qu = (s3[..., None, None, None] * rrr
-                + (s2 * rinv)[..., None, None, None] * term_delta_r) * norm_const   # [n,n,3,3,3]
+                - (s2 * rinv)[..., None, None, None] * term_delta_r) * norm_const   # [n,n,3,3,3]
 
         rrrr = torch.einsum('ija,ijb,ijc,ijd->ijabcd', rhat, rhat, rhat, rhat)
         term_delta_rr = (torch.einsum('ab,ijc,ijd->ijabcd', eye, rhat, rhat)
@@ -92,7 +92,7 @@ def make_kernels(r, sigma, norm_const, compute_u=True, compute_Q=True):
                             + torch.einsum('ad,bc->abcd', eye, eye))
         term_delta_delta = term_delta_delta.unsqueeze(0).unsqueeze(0)
         f_QQ = (s4[..., None, None, None, None] * rrrr
-                + (s3 * rinv)[..., None, None, None, None] * term_delta_rr
+                - (s3 * rinv)[..., None, None, None, None] * term_delta_rr
                 + (s2 * rinv2)[..., None, None, None, None] * term_delta_delta) * norm_const  # [n,n,3,3,3,3]
 
     return f_qq, f_qu, f_uu, f_Qu, f_QQ

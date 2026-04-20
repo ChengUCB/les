@@ -7,7 +7,7 @@ The Ewald kernels reduce to the bare Coulomb multipole tensors:
 
     f_qu[i,j,c]         ->  -nc * T1  = nc * r̂_c / r^2
     f_uu[i,j,c,d]       ->  +nc * T2  = nc * (3 r̂r̂ - δ) / r^3
-    f_Qu[i,j,c,d,e]     ->  +nc * T3  = nc * (-15 r̂r̂r̂ + 3 [δ r̂]_sym) / r^4
+    f_Qu[i,j,c,d,e]     ->  -nc * T3  = nc * (15 r̂r̂r̂ - 3 [δ r̂]_sym) / r^4
     f_QQ[i,j,c,d,e,f]   ->  +nc * T4  = nc * (105 r̂r̂r̂r̂ - 15 [δ r̂r̂]_sym + 3 [δδ]_sym) / r^5
 
 Derivatives are with respect to r_j, with r = |r_j - r_i|.
@@ -77,13 +77,13 @@ def test_f_uu_large_a_limit(r_raw):
 
 
 def test_f_Qu_large_a_limit(r_raw):
-    """f_Qu -> +nc * T3  as sigma -> 0."""
+    """f_Qu -> -nc * T3  as sigma -> 0."""
     sigma, nc = _setup_small_sigma()
     r = r_raw.double()
     _, _, _, f_Qu, _ = make_kernels(r, sigma, nc, compute_u=False, compute_Q=True)
     _, _, T3, _     = bare_multipole_tensors(r)
 
-    expected = T3 * nc
+    expected = -T3 * nc
     rel = _rel_err(f_Qu, expected, r.shape[0])
     print(f"f_Qu large-a: rel err = {rel:.3e}")
     assert rel < 1e-3, f"f_Qu large-a limit FAILED (rel err {rel:.3e})"
