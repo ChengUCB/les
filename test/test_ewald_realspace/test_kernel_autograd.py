@@ -5,11 +5,10 @@ All derivatives are with respect to r_raw[j] (where r_ij = r_raw[j] - r_raw[i]):
 
     d(f_qq[i,j])       / d(r_raw[j,c])   = -f_qu[i,j,c]
     d(f_qu[i,j,c])     / d(r_raw[j,d])   = -f_uu[i,j,c,d]
-    d(f_uu[i,j,c,d])   / d(r_raw[j,e])   = +f_Qu[i,j,c,d,e]
-    d(f_Qu[i,j,a,b,c]) / d(r_raw[j,d])   = +f_QQ[i,j,a,b,c,d]
+    d(f_uu[i,j,c,d])   / d(r_raw[j,e])   = -f_Qu[i,j,c,d,e]
+    d(f_Qu[i,j,a,b,c]) / d(r_raw[j,d])   = -f_QQ[i,j,a,b,c,d]
 
-The sign alternates because f_qu = -d(phi)/dr_j, while f_uu = d^2(phi)/dr_j^2,
-f_Qu = d^3(phi)/dr_j^3, and f_QQ = d^4(phi)/dr_j^4.
+Each kernel is defined as f_n = (-d/dr_j)^n phi, so every step introduces a minus sign.
 """
 import torch
 import pytest
@@ -93,7 +92,7 @@ def test_f_uu_is_autograd_derivative_of_f_qu(r_raw):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 2: d(f_uu[i,j,c,d]) / d(r_raw[j,e]) = +f_Qu[i,j,c,d,e]
+# Test 2: d(f_uu[i,j,c,d]) / d(r_raw[j,e]) = -f_Qu[i,j,c,d,e]
 # ─────────────────────────────────────────────────────────────────────────────
 def test_f_Qu_is_autograd_derivative_of_f_uu(r_raw):
     sigma, nc = _setup()
@@ -111,17 +110,17 @@ def test_f_Qu_is_autograd_derivative_of_f_uu(r_raw):
         for j in range(n):
             if i == j:
                 continue
-            max_err_j = max(max_err_j, (jac[i,j,:,:,j,:] - f_Qu_analytical[i,j]).abs().max().item())
-            max_err_i = max(max_err_i, (jac[i,j,:,:,i,:] + f_Qu_analytical[i,j]).abs().max().item())
+            max_err_j = max(max_err_j, (jac[i,j,:,:,j,:] + f_Qu_analytical[i,j]).abs().max().item())
+            max_err_i = max(max_err_i, (jac[i,j,:,:,i,:] - f_Qu_analytical[i,j]).abs().max().item())
 
-    print(f"f_Qu: max |d(f_uu)/d(r_j) - f_Qu| = {max_err_j:.3e}")
-    print(f"f_Qu: max |d(f_uu)/d(r_i) + f_Qu| = {max_err_i:.3e}")
-    assert max_err_j < 1e-8, f"d(f_uu[i,j,c,d])/d(r[j,e]) != +f_Qu[i,j,c,d,e]  (max err {max_err_j:.3e})"
-    assert max_err_i < 1e-8, f"d(f_uu[i,j,c,d])/d(r[i,e]) != -f_Qu[i,j,c,d,e]  (max err {max_err_i:.3e})"
+    print(f"f_Qu: max |d(f_uu)/d(r_j) + f_Qu| = {max_err_j:.3e}")
+    print(f"f_Qu: max |d(f_uu)/d(r_i) - f_Qu| = {max_err_i:.3e}")
+    assert max_err_j < 1e-8, f"d(f_uu[i,j,c,d])/d(r[j,e]) != -f_Qu[i,j,c,d,e]  (max err {max_err_j:.3e})"
+    assert max_err_i < 1e-8, f"d(f_uu[i,j,c,d])/d(r[i,e]) != +f_Qu[i,j,c,d,e]  (max err {max_err_i:.3e})"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Test 3: d(f_Qu[i,j,a,b,c]) / d(r_raw[j,d]) = +f_QQ[i,j,a,b,c,d]
+# Test 3: d(f_Qu[i,j,a,b,c]) / d(r_raw[j,d]) = -f_QQ[i,j,a,b,c,d]
 # ─────────────────────────────────────────────────────────────────────────────
 def test_f_QQ_is_autograd_derivative_of_f_Qu(r_raw):
     sigma, nc = _setup()
@@ -139,10 +138,10 @@ def test_f_QQ_is_autograd_derivative_of_f_Qu(r_raw):
         for j in range(n):
             if i == j:
                 continue
-            max_err_j = max(max_err_j, (jac[i,j,:,:,:,j,:] - f_QQ_analytical[i,j]).abs().max().item())
-            max_err_i = max(max_err_i, (jac[i,j,:,:,:,i,:] + f_QQ_analytical[i,j]).abs().max().item())
+            max_err_j = max(max_err_j, (jac[i,j,:,:,:,j,:] + f_QQ_analytical[i,j]).abs().max().item())
+            max_err_i = max(max_err_i, (jac[i,j,:,:,:,i,:] - f_QQ_analytical[i,j]).abs().max().item())
 
-    print(f"f_QQ: max |d(f_Qu)/d(r_j) - f_QQ| = {max_err_j:.3e}")
-    print(f"f_QQ: max |d(f_Qu)/d(r_i) + f_QQ| = {max_err_i:.3e}")
-    assert max_err_j < 1e-8, f"d(f_Qu[i,j,a,b,c])/d(r[j,d]) != +f_QQ[i,j,a,b,c,d]  (max err {max_err_j:.3e})"
-    assert max_err_i < 1e-8, f"d(f_Qu[i,j,a,b,c])/d(r[i,d]) != -f_QQ[i,j,a,b,c,d]  (max err {max_err_i:.3e})"
+    print(f"f_QQ: max |d(f_Qu)/d(r_j) + f_QQ| = {max_err_j:.3e}")
+    print(f"f_QQ: max |d(f_Qu)/d(r_i) - f_QQ| = {max_err_i:.3e}")
+    assert max_err_j < 1e-8, f"d(f_Qu[i,j,a,b,c])/d(r[j,d]) != -f_QQ[i,j,a,b,c,d]  (max err {max_err_j:.3e})"
+    assert max_err_i < 1e-8, f"d(f_Qu[i,j,a,b,c])/d(r[i,d]) != +f_QQ[i,j,a,b,c,d]  (max err {max_err_i:.3e})"

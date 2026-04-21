@@ -156,7 +156,7 @@ class Ewald(nn.Module):
             # potential and field at j induced by quadrupoles at all i
             # (sign convention matches the triclinic structure factor S_Q = -(1/2)(k·Q·k))
             e_phi_Q = 0.5 * torch.einsum('iqab,ijab->jq', quad, f_uu)
-            E_Q = -0.5 * torch.einsum('iqab,ijabc->jqc', quad, f_Qu)
+            E_Q = 0.5 * torch.einsum('iqab,ijabc->jqc', quad, f_Qu)
             e_phi = e_phi + e_phi_Q
 
             pot_Qq = torch.einsum('iq,iq->q', q, e_phi_Q)
