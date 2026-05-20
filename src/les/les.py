@@ -8,6 +8,7 @@ from .module import (
     BEC,
     FixedCharges,
     AtomicAlpha,
+    AlphaDerivative,
 )
 
 __all__ = ['Les']
@@ -57,6 +58,8 @@ class Les(nn.Module):
              epsilon_factor=self.epsilon_factor,
              )
 
+        self.alpha_deriv = AlphaDerivative()
+
     def _parse_arguments(self, les_arguments: Dict[str, Any]):
         """
         Parse arguments for LES model
@@ -94,6 +97,7 @@ class Les(nn.Module):
                compute_field: bool = False,
                compute_bec: bool = False,
                bec_output_index: Optional[int] = None, # option to compute BEC components along only one direction
+               compute_alpha_deriv: bool = False,
                ) -> Dict[str, Optional[torch.Tensor]]:
         """
         arguments:
@@ -164,6 +168,17 @@ class Les(nn.Module):
         if latent_kappas is not None and q_induced is not None: 
             latent_charges = latent_charges + q_induced
 
+        # compute alpha derivative d(total_alpha_ij)/d(r_{n,k})
+        if compute_alpha_deriv and latent_alphas is not None:
+            alpha_deriv = self.alpha_deriv(
+                alpha=latent_alphas,
+                r=positions,
+                cell=cell,
+                batch=batch,
+            )
+        else:
+            alpha_deriv = None
+
         # compute the BEC
         if compute_bec:
             bec = self.bec(q=latent_charges,
@@ -183,8 +198,9 @@ class Les(nn.Module):
             'latent_quads': latent_quads,
             'latent_alphas': latent_alphas,
             'BEC': bec,
+            'alpha_deriv': alpha_deriv,
             }
-        return output 
+        return output
 
 class _DummyAtomwise(nn.Module):
     def forward(self, desc: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
