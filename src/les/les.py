@@ -170,6 +170,8 @@ class Les(nn.Module):
 
         # compute alpha derivative d(total_alpha_ij)/d(r_{n,k})
         if compute_alpha_deriv and latent_alphas is not None:
+            if not hasattr(self, 'alpha_deriv'):
+                self.alpha_deriv = AlphaDerivative()
             alpha_deriv = self.alpha_deriv(
                 alpha=latent_alphas,
                 r=positions,
