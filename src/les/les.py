@@ -40,16 +40,8 @@ class Les(nn.Module):
             else _DummyAtomwise()
         )
 
-        self.fixed_charges: Optional[FixedCharges] = (
-            FixedCharges(normalization_factor=self.fixed_atomic_charges_scaling_factor)
-            if self.use_fixed_atomic_charges
-            else None
-        )
-        self.atomic_alpha: Optional[AtomicAlpha] = (
-            AtomicAlpha()
-            if self.use_atomic_alpha
-            else None
-        )
+        self.fixed_charges: nn.Module = FixedCharges(normalization_factor=self.fixed_atomic_charges_scaling_factor)
+        self.atomic_alpha: nn.Module = AtomicAlpha()
 
         self.ewald = Ewald(
             sigma=self.sigma,
@@ -130,13 +122,11 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
-        fixed_charges = self.fixed_charges
-        if atomic_numbers is not None and fixed_charges is not None:
-            latent_charges = latent_charges + fixed_charges(atomic_numbers)
+        if atomic_numbers is not None and self.use_fixed_atomic_charges:
+            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
 
-        atomic_alpha = self.atomic_alpha
-        if atomic_numbers is not None and atomic_alpha is not None and latent_alphas is not None:
-            baseline_alphas = atomic_alpha(atomic_numbers)
+        if atomic_numbers is not None and self.use_atomic_alpha and latent_alphas is not None:
+            baseline_alphas = self.atomic_alpha(atomic_numbers)
             #print(f'baseline_alphas: {baseline_alphas}')
             if latent_alphas.dim() == 1:
                 latent_alphas = latent_alphas + baseline_alphas
