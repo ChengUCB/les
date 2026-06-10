@@ -1,5 +1,5 @@
 import torch
-from types import Optional
+from typing import Optional
 
 def make_kernels(r, sigma: float, norm_const: float, compute_u: bool=True, compute_Q: bool=True):
     """
