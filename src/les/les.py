@@ -14,6 +14,7 @@ __all__ = ['Les']
 
 class Les(nn.Module):
 
+    __constants__ = ['use_fixed_atomic_charges', 'use_atomic_alpha', 'use_atomwise', 'use_epsilon_r_scaling']
     def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
         """
         LES model for long-range interations
@@ -40,8 +41,10 @@ class Les(nn.Module):
             else _DummyAtomwise()
         )
 
-        self.fixed_charges: nn.Module = FixedCharges(normalization_factor=self.fixed_atomic_charges_scaling_factor)
-        self.atomic_alpha: nn.Module = AtomicAlpha()
+        if self.use_fixed_atomic_charges:
+            self.fixed_charges = FixedCharges(normalization_factor=self.fixed_atomic_charges_scaling_factor)
+        if self.use_atomic_alpha:
+            self.atomic_alpha = AtomicAlpha()
 
         self.ewald = Ewald(
             sigma=self.sigma,
