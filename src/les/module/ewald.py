@@ -40,7 +40,7 @@ class Ewald(nn.Module):
                 e_ext: Optional[torch.Tensor] = None,
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        
+
         # Check the input dimension
         n, d = r.shape
         assert d == 3, 'r dimension error'
@@ -63,22 +63,22 @@ class Ewald(nn.Module):
             kappa_now = kappa[mask] if kappa is not None else None
             alpha_now = alpha[mask] if alpha is not None else None
             box_now = cell[i] if cell is not None else None # Get the box for the i-th configuration
-            
+
             # check if the box is periodic or not
             if box_now is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
                 result = self.compute_potential_realspace(r_raw=r_raw_now, q=q_now, u=u_now,
                                                           quad=quad_now,
-                                                          kappa=kappa_now, 
+                                                          kappa=kappa_now,
                                                           alpha=alpha_now,
                                                           compute_field=compute_field,
                                                           e_ext=e_ext,
                                                           )
             else:
                 # the box is periodic, we use the reciprocal sum
-                result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now, 
-                                                          cell_now=box_now, u=u_now, quad=quad_now, 
-                                                          kappa=kappa_now, alpha=alpha_now, 
+                result = self.compute_potential_triclinic(r_raw=r_raw_now, q=q_now,
+                                                          cell_now=box_now, u=u_now, quad=quad_now,
+                                                          kappa=kappa_now, alpha=alpha_now,
                                                           compute_field=compute_field,
                                                           e_ext=e_ext,
                                                           )
@@ -221,6 +221,7 @@ class Ewald(nn.Module):
         return output
 
     def _get_induced_q(self, e_phi, kappa):
+        assert kappa is not None
         if kappa.dim() == 1:
             kappa = kappa.unsqueeze(1)
         assert kappa.dim() == 2, 'kappa dimension error'
@@ -228,6 +229,7 @@ class Ewald(nn.Module):
         return q_induced
 
     def _get_induced_u(self, e_field, alpha, e_ext: Optional[torch.Tensor]=None):
+        assert alpha is not None
         if e_ext is not None:
             e_field = e_field + e_ext[None,None,:]
         if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
@@ -243,11 +245,12 @@ class Ewald(nn.Module):
         return u_induced
 
     def _get_epsilon_r(self, alpha, volume):
+        assert alpha is not None
         epsilon_0 = 0.00552635  # e^2 eV^{-1} A^{-1}
         if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
             alpha = alpha.unsqueeze(1)
         if alpha.dim() == 2: # isotropic alpha
-            epsilon_r = alpha.sum(axis=0) / volume / epsilon_0 + 1.
+            epsilon_r = alpha.sum(dim=0) / volume / epsilon_0 + 1.
         elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3): # anisotropic alpha
             assert alpha is not None
             epsilon_r = torch.einsum('iqcc->q', alpha) / 3. / volume / epsilon_0 + 1.
@@ -256,12 +259,12 @@ class Ewald(nn.Module):
         return epsilon_r
 
     # Triclinic box(could be orthorhombic)
-    def compute_potential_triclinic(self, r_raw, q, cell_now, 
+    def compute_potential_triclinic(self, r_raw, q, cell_now,
                                     u: Optional[torch.Tensor]=None,
-                                    quad: Optional[torch.Tensor]=None, 
-                                    kappa:Optional[torch.Tensor]=None, 
-                                    alpha:Optional[torch.Tensor]=None, 
-                                    compute_potential:bool =False, 
+                                    quad: Optional[torch.Tensor]=None,
+                                    kappa:Optional[torch.Tensor]=None,
+                                    alpha:Optional[torch.Tensor]=None,
+                                    compute_potential:bool =False,
                                     compute_field: bool=False,
                                     e_ext: Optional[torch.Tensor]=None):
         device = r_raw.device
@@ -349,12 +352,12 @@ class Ewald(nn.Module):
             S_k_real = S_k_real + S_k_real_Q
             S_k_imag_Q = -0.5 * (qk2 * sin_kr.unsqueeze(1)).sum(dim=0)
             S_k_imag = S_k_imag + S_k_imag_Q
-        
+
         S_k_sq = S_k_real**2 + S_k_imag**2  # [n_q, M]
 
         # Compute kfac,  exp(-σ^2/2 k^2) / k^2 for exponent = 1
         kfac = torch.exp(-self.sigma_sq_half * k_sq) / k_sq
-        
+
         # Compute potential energy, (2π/volume)* sum(factors * kfac * |S(k)|^2)
         pot = (factors * kfac * S_k_sq).sum(dim=1) / volume * self.norm_factor # [n_q]
 
@@ -377,13 +380,13 @@ class Ewald(nn.Module):
 
         # for computing electric potential
         if compute_potential or kappa is not None:
-            # real part of exp(-ik*r) * S(k) is the contribution to the potential, 
+            # real part of exp(-ik*r) * S(k) is the contribution to the potential,
             # Real part -> cos(k*r)*S_real + sin(k*r)*S_imag
             term_real = S_k_real.unsqueeze(0) * cos_kr.unsqueeze(1) + S_k_imag.unsqueeze(0) * sin_kr.unsqueeze(1) # [n, n_q, M]
             e_phi = (prefactor.unsqueeze(0) * term_real).sum(dim=2) # [n, n_q]
 
             if self.remove_self_interaction:
-                e_phi -= q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor # [n, n_q] 
+                e_phi -= q * (2 / (self.sigma * self.twopi**1.5)) * self.norm_factor # [n, n_q]
 
             if kappa is not None: # compute induced charges
                 q_induced = self._get_induced_q(e_phi, kappa)
@@ -395,7 +398,7 @@ class Ewald(nn.Module):
             # imaginary part of exp(-ik*r) * S(k) contributes to the field
             # Imaginary part -> cos(k*r)*S_imag - sin(k*r)*S_real
             term_imag = S_k_real.unsqueeze(0) * sin_kr.unsqueeze(1) - S_k_imag.unsqueeze(0) * cos_kr.unsqueeze(1) # [n, n_q, M]
-            e_field = (prefactor.unsqueeze(0).unsqueeze(0).unsqueeze(3) 
+            e_field = (prefactor.unsqueeze(0).unsqueeze(0).unsqueeze(3)
                        * term_imag.unsqueeze(3) * kvec.unsqueeze(0).unsqueeze(0)).sum(dim=2) # [n, n_q, 3]
 
             if self.remove_self_interaction and u is not None:
