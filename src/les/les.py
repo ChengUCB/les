@@ -14,6 +14,7 @@ __all__ = ['Les']
 
 class Les(nn.Module):
 
+    __constants__ = ['use_fixed_atomic_charges', 'use_atomic_alpha', 'use_atomwise', 'use_epsilon_r_scaling']
     def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
         """
         LES model for long-range interations
@@ -28,13 +29,13 @@ class Les(nn.Module):
                     les_arguments = {}
 
         self._parse_arguments(les_arguments)
- 
+
         self.atomwise: nn.Module = (
             Atomwise(
                 n_layers=self.n_layers,
                 n_hidden=self.n_hidden,
                 add_linear_nn=self.add_linear_nn,
-                output_scaling_factor=self.output_scaling_factor, 
+                output_scaling_factor=self.output_scaling_factor,
             )
             if self.use_atomwise
             else _DummyAtomwise()
@@ -78,7 +79,7 @@ class Les(nn.Module):
         self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
         self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
-    def forward(self, 
+    def forward(self,
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]
                e_ext: Optional[torch.Tensor]= None,
@@ -124,17 +125,17 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
-        if atomic_numbers is not None and hasattr(self, 'use_fixed_atomic_charges') and self.use_fixed_atomic_charges:
+        if atomic_numbers is not None and self.use_fixed_atomic_charges:
             latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
 
-        if atomic_numbers is not None and hasattr(self, 'use_atomic_alpha') and self.use_atomic_alpha and latent_alphas is not None:
+        if atomic_numbers is not None and self.use_atomic_alpha and latent_alphas is not None:
             baseline_alphas = self.atomic_alpha(atomic_numbers)
             #print(f'baseline_alphas: {baseline_alphas}')
             if latent_alphas.dim() == 1:
                 latent_alphas = latent_alphas + baseline_alphas
             elif latent_alphas.dim() == 3:
                 latent_alphas = latent_alphas + baseline_alphas[:,None,None] * torch.eye(3, device=baseline_alphas.device).unsqueeze(0) # [n_atoms, 3, 3]
-          
+
 
         # compute the long-range interactions
         if compute_energy:
@@ -160,8 +161,8 @@ class Les(nn.Module):
                 latent_dipoles = latent_dipoles + u_induced
             else:
                 latent_dipoles = u_induced
-       
-        if latent_kappas is not None and q_induced is not None: 
+
+        if latent_kappas is not None and q_induced is not None:
             latent_charges = latent_charges + q_induced
 
         # compute the BEC
@@ -184,7 +185,7 @@ class Les(nn.Module):
             'latent_alphas': latent_alphas,
             'BEC': bec,
             }
-        return output 
+        return output
 
 class _DummyAtomwise(nn.Module):
     def forward(self, desc: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
