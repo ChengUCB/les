@@ -1,6 +1,7 @@
 import torch
+from typing import Optional
 
-def make_kernels(r, sigma, norm_const, compute_u=True, compute_Q=True):
+def make_kernels(r, sigma: float, norm_const: float, compute_u: bool=True, compute_Q: bool=True):
     """
     Compute the Ewald real-space interaction kernels.
 
@@ -32,10 +33,10 @@ def make_kernels(r, sigma, norm_const, compute_u=True, compute_Q=True):
 
     f_qq = erf * rinv * norm_const                                                  # [n,n]
 
-    f_qu = None
-    f_uu = None
-    f_Qu = None
-    f_QQ = None
+    f_qu: Optional[torch.Tensor] = None
+    f_uu: Optional[torch.Tensor] = None
+    f_Qu: Optional[torch.Tensor] = None
+    f_QQ: Optional[torch.Tensor] = None
 
     if not (compute_u or compute_Q):
         return f_qq, f_qu, f_uu, f_Qu, f_QQ
