@@ -79,6 +79,21 @@ class Les(nn.Module):
         self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
         self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
+    def __setstate__(self, state: Dict[str, Any]):
+        # Backward compatibility: models serialized before these feature flags
+        # existed lack the corresponding attributes. forward() and __constants__
+        # now access them directly (no hasattr), so we restore their historical
+        # defaults at deserialization time. This keeps forward() TorchScript-
+        # friendly while still loading (and scripting) older checkpoints.
+        for key, default in {
+            'use_atomwise': False,
+            'use_fixed_atomic_charges': False,
+            'use_atomic_alpha': False,
+            'use_epsilon_r_scaling': False,
+        }.items():
+            state.setdefault(key, default)
+        super().__setstate__(state)
+
     def forward(self,
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]

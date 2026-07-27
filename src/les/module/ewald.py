@@ -140,7 +140,6 @@ class Ewald(nn.Module):
         pot = 0.5 * torch.einsum('iq,iq->q', e_phi, q)
 
         if u is not None:
-            assert u is not None
             assert f_qu is not None
             e_phi_u = torch.einsum('iqc,ijc->jq', u, f_qu)
             e_phi = e_phi + e_phi_u
@@ -158,7 +157,6 @@ class Ewald(nn.Module):
         if quad is not None:
             # potential and field at j induced by quadrupoles at all i
             # (sign convention matches the triclinic structure factor S_Q = -(1/2)(k·Q·k))
-            assert quad is not None
             assert f_uu is not None
             e_phi_Q = 0.5 * torch.einsum('iqab,ijab->jq', quad, f_uu)
             assert f_Qu is not None
@@ -170,7 +168,6 @@ class Ewald(nn.Module):
             pot_QQ = 0.125 * torch.einsum('iqab,ijabcd,jqcd->q', quad, f_QQ, quad)
             pot = pot + pot_Qq + pot_QQ
             if u is not None:
-                assert u is not None
                 pot_Qu = -torch.einsum('iqc,iqc->q', u, E_Q)
                 pot = pot + pot_Qu
         else:  # for torchscript compatibility
@@ -221,7 +218,6 @@ class Ewald(nn.Module):
         return output
 
     def _get_induced_q(self, e_phi, kappa):
-        assert kappa is not None
         if kappa.dim() == 1:
             kappa = kappa.unsqueeze(1)
         assert kappa.dim() == 2, 'kappa dimension error'
@@ -229,7 +225,6 @@ class Ewald(nn.Module):
         return q_induced
 
     def _get_induced_u(self, e_field, alpha, e_ext: Optional[torch.Tensor]=None):
-        assert alpha is not None
         if e_ext is not None:
             e_field = e_field + e_ext[None,None,:]
         if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
@@ -238,21 +233,18 @@ class Ewald(nn.Module):
             u_induced = e_field * alpha.unsqueeze(2) # [n, n_q, 3]
         elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3):
             # e_field: [n, n_q, 3], alpha: [n, n_q, 3, 3]
-            assert alpha is not None
             u_induced = torch.einsum('iqc,iqcd->iqd', e_field, alpha)
         else:
             raise ValueError('alpha dimension error')
         return u_induced
 
     def _get_epsilon_r(self, alpha, volume):
-        assert alpha is not None
         epsilon_0 = 0.00552635  # e^2 eV^{-1} A^{-1}
         if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3,3)):
             alpha = alpha.unsqueeze(1)
         if alpha.dim() == 2: # isotropic alpha
             epsilon_r = alpha.sum(dim=0) / volume / epsilon_0 + 1.
         elif alpha.dim() == 4 and alpha.shape[2:4] == (3,3): # anisotropic alpha
-            assert alpha is not None
             epsilon_r = torch.einsum('iqcc->q', alpha) / 3. / volume / epsilon_0 + 1.
         else:
             raise ValueError('alpha dimension error')
@@ -346,7 +338,6 @@ class Ewald(nn.Module):
             S_k_imag = S_k_imag + S_k_imag_u
 
         if quad is not None:
-            assert quad is not None
             qk2 = torch.einsum("mi,ncij,mj->ncm",kvec, quad, kvec)
             S_k_real_Q = -0.5 * (qk2 * cos_kr.unsqueeze(1)).sum(dim=0)
             S_k_real = S_k_real + S_k_real_Q
