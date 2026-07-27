@@ -48,7 +48,8 @@ class BEC(nn.Module):
         # compute the polarization for each batch
         all_P = []
         all_P_u = []
-        all_phases = [] 
+        all_phases = []
+        all_projections = []
         for i in unique_batches.long():
             mask = batch == i  # Create a mask for the i-th configuration
             r_now, q_now = r[mask], q[mask]
@@ -63,15 +64,14 @@ class BEC(nn.Module):
             if cell is None or torch.linalg.det(box_now) < 1e-6:
                 # the box is not periodic, we use the direct sum
                 polarization = torch.sum(q_now * r_now, dim=0)
-                phase = torch.ones_like(r_now, dtype=torch.complex64)
+                phase = torch.ones_like(r_now, dtype=self._complex_dtype(r_now.dtype))
+                projection = torch.eye(3, device=r_now.device, dtype=r_now.dtype)
             else:
-                polarization, phase = self.compute_pol_pbc(r_now, q_now, box_now)
-            if output_index is not None:
-                polarization = polarization[output_index]
-                phase = phase[:, output_index]
+                polarization, phase, projection = self.compute_pol_pbc(r_now, q_now, box_now)
 
             all_P.append(polarization * self.normalization_factor)
             all_phases.append(phase)
+            all_projections.append(projection)
 
             if u is not None:
                 u_now = u[mask]
@@ -83,13 +83,24 @@ class BEC(nn.Module):
 
         # take the gradient of the polarization w.r.t. the positions to get the complex BEC
         #Grad returns P on 2nd index, BEC is defined with P on first index 
-        bec_complex = grad(y=P, x=r).transpose(1,2).contiguous()
-        # dephase
-        result = bec_complex * phases.unsqueeze(2).conj() #Multiply on 1st index
-        result = result.real
+        bec_basis_complex = grad(y=P, x=r).transpose(1,2).contiguous()
+        # dephase in the same reciprocal-lattice basis used to define each phase
+        result_basis = (bec_basis_complex * phases.unsqueeze(2).conj()).real
+
+        result = torch.zeros_like(result_basis)
+        for i, projection in zip(unique_batches.long(), all_projections):
+            mask = batch == i
+            projection = projection.to(device=result_basis.device, dtype=result_basis.dtype)
+            result[mask] = torch.matmul(projection.unsqueeze(0), result_basis[mask])
+
+        if output_index is not None:
+            result = result[:, output_index, :]
+
         if u is not None:
             P_u = torch.stack(all_P_u, dim=0)
             result_u = grad(y=P_u, x=r).transpose(1,2).contiguous()
+            if output_index is not None:
+                result_u = result_u[:, output_index, :]
             return torch.stack([result, result_u], dim=1)
         return result
  
@@ -97,9 +108,13 @@ class BEC(nn.Module):
         r_frac = torch.matmul(r_now, torch.linalg.inv(box_now))
         phase = torch.exp(1j * 2.* torch.pi * r_frac)
         S = torch.sum(q_now * phase, dim=0)
-        polarization = torch.matmul(box_now.to(S.dtype), 
-                                    S.unsqueeze(1)) / (1j * 2.* torch.pi)
-        return polarization.reshape(-1), phase
+        polarization = S / (1j * 2.* torch.pi)
+        projection = box_now.T
+        return polarization.reshape(-1), phase, projection
+
+    @staticmethod
+    def _complex_dtype(dtype: torch.dtype) -> torch.dtype:
+        return torch.complex128 if dtype == torch.float64 else torch.complex64
 
     def __repr__(self):
         return f'BEC(remove_mean={self.remove_mean}, epsilon_factor={self.epsilon_factor})'
