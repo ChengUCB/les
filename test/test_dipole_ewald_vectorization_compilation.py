@@ -53,12 +53,11 @@ def pick_device():
     return torch.device("cpu")
 
 
-# Known gaps to fix in upcoming phases: reported but do NOT hard-fail the suite,
-# so "green" always means "everything currently supported works". Remove a tag
-# once its phase lands.
-#   - realspace AOTInductor export ("fake tensor in constants") -> Phase 1
-KNOWN_GAPS = {"non-periodic (realspace):aoti",
-              "non-periodic (realspace):dynamic-aoti"}
+# Known gaps: reported but do NOT hard-fail the suite, so "green" always means
+# "everything currently supported works". Add a tag when a phase defers something,
+# remove it once fixed. (The realspace AOTInductor gap was fixed by expressing
+# sqrt/division as pow(0.5)/pow(-1) in Ewald_vectorized.)
+KNOWN_GAPS = set()
 
 DEVICE = pick_device()
 # MPS is float32-only; use float32 on-device for compile/AOTI, float64 on CPU
@@ -257,6 +256,26 @@ def check_dynamic(is_periodic: bool, label: str):
     return fails
 
 
+def check_mixed_dtype(is_periodic: bool, label: str):
+    """Regression: LAMMPS/ASE hand over a float64 cell alongside float32
+    positions. The compute dtype must follow the positions, not the cell."""
+    fails = []
+    r, q, cell, batch = make_single("cpu", torch.float32, 12, is_periodic)
+    vec = ForceWrapper(Les({"is_periodic": is_periodic}))
+    E_ref, F_ref = _run(vec, r, q, cell, batch)
+    try:
+        E_mix, F_mix = _run(vec, r, q, cell.double(), batch)   # float64 cell
+        okE, okF = _close(E_mix, E_ref, 1e-5, 1e-5), _close(F_mix, F_ref, 1e-4, 1e-5)
+        print(f"[F dtype   ] f64 cell + f32 pos | dE={float((E_mix-E_ref).abs().max()):.2e} "
+              f"dF={float((F_mix-F_ref).abs().max()):.2e} | E {'OK' if okE else 'FAIL'} F {'OK' if okF else 'FAIL'}")
+        if not (okE and okF):
+            fails.append(f"{label}:mixed-dtype")
+    except Exception as e:
+        print(f"[F dtype   ] FAILED -> {type(e).__name__}: {str(e)[:140]}")
+        fails.append(f"{label}:mixed-dtype-error")
+    return fails
+
+
 # TERMS to extend as vectorized multipoles land:
 #   monopole  -> now (latent_charges)
 #   dipole    -> latent_dipoles      (Phase 2)
@@ -266,8 +285,10 @@ def main():
     all_fails = []
     all_fails += check_case(is_periodic=True, label="periodic (reciprocal)")
     all_fails += check_dynamic(is_periodic=True, label="periodic (reciprocal)")
+    all_fails += check_mixed_dtype(is_periodic=True, label="periodic (reciprocal)")
     all_fails += check_case(is_periodic=False, label="non-periodic (realspace)")
     all_fails += check_dynamic(is_periodic=False, label="non-periodic (realspace)")
+    all_fails += check_mixed_dtype(is_periodic=False, label="non-periodic (realspace)")
 
     print("\n==================== SUMMARY ====================")
     if all_fails:

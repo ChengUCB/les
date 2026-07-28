@@ -256,6 +256,7 @@ class Ewald_vectorized(nn.Module):
         dtype = r.dtype
         N = r.shape[0]
         B = cell.shape[0]
+        q = q.to(dtype=dtype)
 
         idx = torch.arange(N, device=device, dtype=torch.long)
         pair_i, pair_j = torch.meshgrid(idx, idx, indexing="ij")
@@ -263,13 +264,18 @@ class Ewald_vectorized(nn.Module):
         pair_j_safe = torch.where(same_batch, pair_j, torch.zeros_like(pair_j))
 
         diff = r[pair_i] - r[pair_j_safe]                                # [N, N, 3]
-        dist = torch.norm(diff, dim=-1).clamp(min=1e-6)                  # [N, N]
-        erf_val = torch.special.erf(dist / (self.sigma * (2.0 ** 0.5))) # [N, N]
+        # pow(0.5)/pow(-1) rather than sqrt/division: ops whose backward reuses
+        # the forward *output* (sqrt, div, exp) break AOTInductor export when the
+        # forces are taken inside the traced forward, while pow-based forms trace
+        # fine. Mathematically identical.
+        dist_sq = diff.pow(2).sum(dim=-1).clamp(min=1e-12)               # [N, N]
+        dist = dist_sq.pow(0.5)                                          # [N, N]
+        erf_val = torch.special.erf(dist * (1.0 / (self.sigma * (2.0 ** 0.5)))) # [N, N]
 
         qq_pair = (q[pair_i] * q[pair_j_safe]).sum(dim=-1)               # [N, N]
 
         keep = (same_batch & (pair_i != pair_j)).to(dtype)
-        pot_per_pair = qq_pair * erf_val / dist * keep                   # [N, N]
+        pot_per_pair = qq_pair * erf_val * dist.pow(-1) * keep           # [N, N]
 
         pair_batch = batch[pair_i]                                       # [N, N]
         pot_per_batch_double = torch.zeros(B, device=device, dtype=pot_per_pair.dtype)
@@ -289,10 +295,16 @@ class Ewald_vectorized(nn.Module):
     def compute_potential_triclinic(self, r, q, cell, batch):
 
         device = r.device
+        # single source of truth for the compute dtype: callers may hand over a
+        # float64 cell (LAMMPS/ASE do) with float32 positions, and mixing the two
+        # makes the structure-factor accumulation below fail on dtype.
+        dtype = r.dtype
 
         N, n_q = q.shape
         B = cell.shape[0]
-        nvec = self.nvec_all.to(device=device,dtype=cell.dtype)  # [K, 3]
+        cell = cell.to(dtype=dtype)
+        q = q.to(dtype=dtype)
+        nvec = self.nvec_all.to(device=device, dtype=dtype)  # [K, 3]
         K = nvec.shape[0] # K = (2*N_max+1)^3
 
         # --- 1. Reciprocal lattice G_b = 2π (M_b^{-1})^T ---
@@ -333,7 +345,7 @@ class Ewald_vectorized(nn.Module):
         S_k_real_per_atom = q_exp * cos_exp  # [N, n_q, K]
         S_k_imag_per_atom = q_exp * sin_exp  # [N, n_q, K]
         # sum over atoms to get S_k
-        S_real = torch.zeros(B, n_q, K, device=device, dtype=r.dtype)  # [B, n_q, K]
+        S_real = torch.zeros(B, n_q, K, device=device, dtype=dtype)  # [B, n_q, K]
         S_imag = torch.zeros_like(S_real)  # [B, n_q, K]
 
         index = batch.view(N, 1, 1).expand(-1, n_q, K)  # [N, n_q, K]
@@ -352,7 +364,7 @@ class Ewald_vectorized(nn.Module):
         # --- Remove self-interaction if applicable ---
         if self.remove_self_interaction:
             q_sq_per_atom = (q ** 2).sum(dim=1)  # [N]
-            self_per_batch = torch.zeros(B, device=device, dtype=r.dtype)  # [B]
+            self_per_batch = torch.zeros(B, device=device, dtype=dtype)  # [B]
             self_per_batch.scatter_add_(0, batch, q_sq_per_atom.to(dtype=self_per_batch.dtype)) # [B]
             self_term = self_per_batch / (self.sigma * (2*torch.pi)**1.5)  # [B]
             pot_per_batch_per_q = pot_per_batch_per_q - self_term.view(B, 1) # [B, n_q]
