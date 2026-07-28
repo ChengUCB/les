@@ -23,7 +23,15 @@ Run:
 import sys
 import torch
 
+import les
 from les import Les
+# Fail fast (and show which les is loaded) so we never silently test an OLD
+# installed les that lacks the vectorized Ewald -- e.g. one that nequip-les
+# pulled into site-packages. On the cluster run with the develop source:
+#   PYTHONPATH=src python test/test_dipole_ewald_vectorization_compilation.py
+# or reinstall the develop repo editable (last, after nequip-les).
+from les.module import Ewald_vectorized  # noqa: F401  -> ImportError if wrong les
+print(f"[info] les from: {les.__file__}")
 
 # Compiling a forward that calls torch.autograd.grad (force = -dE/dr) requires
 # dynamo to trace through the autograd op. AOTInductor export handles this
@@ -49,7 +57,8 @@ def pick_device():
 # so "green" always means "everything currently supported works". Remove a tag
 # once its phase lands.
 #   - realspace AOTInductor export ("fake tensor in constants") -> Phase 1
-KNOWN_GAPS = {"non-periodic (realspace):aoti"}
+KNOWN_GAPS = {"non-periodic (realspace):aoti",
+              "non-periodic (realspace):dynamic-aoti"}
 
 DEVICE = pick_device()
 # MPS is float32-only; use float32 on-device for compile/AOTI, float64 on CPU
@@ -81,6 +90,22 @@ def make_inputs(device, dtype, periodic: bool):
                        for cfg, n_i in enumerate(n_per)], 0)
     q = (torch.rand(sum(n_per), dtype=dtype, device=device) * 2 - 1)
     return r, q, cells, batch
+
+
+def make_single(device, dtype, n: int, periodic: bool, seed: int = 7):
+    """One structure (B=1, batch all zeros) -- the shape a LAMMPS pair_style
+    call actually feeds, and the configuration of NequIP-LES issue #15."""
+    torch.manual_seed(seed)
+    if periodic:
+        cell = torch.tensor([[10., 2., 1.], [0, 9., 1.5], [0, 0, 10.]],
+                            dtype=dtype, device=device).unsqueeze(0)
+        r = torch.rand(n, 3, dtype=dtype, device=device) @ cell[0]
+    else:
+        cell = torch.zeros(1, 3, 3, dtype=dtype, device=device)
+        r = torch.rand(n, 3, dtype=dtype, device=device) * 8.0
+    q = (torch.rand(n, dtype=dtype, device=device) * 2 - 1)
+    batch = torch.zeros(n, dtype=torch.long, device=device)
+    return r, q, cell, batch
 
 
 # ----------------------------------------------------------------------------
@@ -175,6 +200,63 @@ def check_case(is_periodic: bool, label: str):
     return fails
 
 
+def check_dynamic(is_periodic: bool, label: str):
+    """Dynamic-shape gate on a single structure (B=1), which is how LAMMPS calls
+    the model: the atom count changes between calls, so a deployment artifact
+    must generalize over N rather than specialize to the traced size.
+
+    Export/compile at N1, then EXECUTE at N2 != N1 and compare to eager at N2.
+    """
+    print(f"\n---------------- {label} | dynamic shapes, B=1 ----------------")
+    fails = []
+    N1, N2 = 12, 20
+
+    vec = ForceWrapper(Les({"is_periodic": is_periodic})).to(DEVICE)
+    a1 = make_single(DEVICE, DEVICE_DTYPE, N1, is_periodic)
+    a2 = make_single(DEVICE, DEVICE_DTYPE, N2, is_periodic, seed=11)
+    Ee2, Fe2 = _run(vec, *a2)  # eager reference at the *second* size
+
+    # --- D. torch.compile(dynamic=True): run at N1 then N2 (no recompile-to-wrong)
+    try:
+        cvec = torch.compile(vec, fullgraph=True, dynamic=True)
+        _run(cvec, *a1)
+        Ed, Fd = _run(cvec, *a2)
+        okE, okF = _close(Ed, Ee2, 1e-4, 1e-4), _close(Fd, Fe2, 1e-3, 1e-3)
+        print(f"[D dyn-comp] N{N1}->N{N2} vs eager | dE={float((Ed-Ee2).abs().max()):.2e} "
+              f"dF={float((Fd-Fe2).abs().max()):.2e} | E {'OK' if okE else 'FAIL'} F {'OK' if okF else 'FAIL'}")
+        if not (okE and okF):
+            fails.append(f"{label}:dynamic-compile")
+    except Exception as e:
+        print(f"[D dyn-comp] FAILED -> {type(e).__name__}: {str(e)[:180]}")
+        fails.append(f"{label}:dynamic-compile-error")
+
+    # --- E. AOTInductor with a dynamic atom dimension -----------------------
+    tag = f"{label}:dynamic-aoti"
+    try:
+        nat = torch.export.Dim("natoms", min=2, max=1 << 20)
+        dyn = {"positions": {0: nat}, "latent_charges": {0: nat},
+               "cell": None, "batch": {0: nat}}
+        r1 = a1[0].detach().requires_grad_(True)
+        ep = torch.export.export(vec, (r1, a1[1], a1[2], a1[3]), dynamic_shapes=dyn)
+        aoti = torch._inductor.aoti_load_package(
+            torch._inductor.aoti_compile_and_package(ep))
+        r2 = a2[0].detach().requires_grad_(True)
+        Ea, Fa = aoti(r2, a2[1], a2[2], a2[3])   # executed at N2 != traced N1
+        okE, okF = _close(Ea, Ee2, 1e-4, 1e-4), _close(Fa, Fe2, 1e-3, 1e-3)
+        print(f"[E dyn-aoti] N{N1}->N{N2} vs eager | dE={float((Ea-Ee2).abs().max()):.2e} "
+              f"dF={float((Fa-Fe2).abs().max()):.2e} | E {'OK' if okE else 'FAIL'} F {'OK' if okF else 'FAIL'}")
+        if not (okE and okF):
+            (print(f"             (KNOWN-GAP: {tag})") if tag in KNOWN_GAPS
+             else fails.append(tag))
+    except Exception as e:
+        note = "KNOWN-GAP" if tag in KNOWN_GAPS else "FAILED"
+        print(f"[E dyn-aoti] {note} -> {type(e).__name__}: {str(e)[:180]}")
+        if tag not in KNOWN_GAPS:
+            fails.append(f"{tag}-error")
+
+    return fails
+
+
 # TERMS to extend as vectorized multipoles land:
 #   monopole  -> now (latent_charges)
 #   dipole    -> latent_dipoles      (Phase 2)
@@ -183,7 +265,9 @@ def check_case(is_periodic: bool, label: str):
 def main():
     all_fails = []
     all_fails += check_case(is_periodic=True, label="periodic (reciprocal)")
+    all_fails += check_dynamic(is_periodic=True, label="periodic (reciprocal)")
     all_fails += check_case(is_periodic=False, label="non-periodic (realspace)")
+    all_fails += check_dynamic(is_periodic=False, label="non-periodic (realspace)")
 
     print("\n==================== SUMMARY ====================")
     if all_fails:
