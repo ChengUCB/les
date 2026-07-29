@@ -4,24 +4,9 @@ from itertools import product
 from typing import Dict, Optional, Tuple, List
 
 from les.module.make_kernels import make_kernels
+from les.module.make_kernels_vectorized import multipole_pair_energy
 
 __all__ = ['Ewald', 'Ewald_vectorized']
-
-
-class _ExpSaveInput(torch.autograd.Function):
-    """
-    exp() whose backward recomputes from the saved *input*.
-    """
-
-    @staticmethod
-    def forward(ctx, x):
-        ctx.save_for_backward(x)
-        return torch.exp(x)
-
-    @staticmethod
-    def backward(ctx, grad_out):
-        (x,) = ctx.saved_tensors
-        return grad_out * torch.exp(x)
 
 class Ewald(nn.Module):
     def __init__(self,
@@ -502,10 +487,10 @@ class Ewald_vectorized(nn.Module):
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         # terms not vectorized yet: use the legacy module (omit is_periodic) for these
-        if quad is not None or kappa is not None or alpha is not None or e_ext is not None or compute_field:
+        if kappa is not None or alpha is not None or e_ext is not None or compute_field:
             raise NotImplementedError(
-                "the vectorized Ewald currently supports latent charges and dipoles; "
-                "omit 'is_periodic' to fall back to the legacy module for quadrupoles, "
+                "the vectorized Ewald currently supports latent charges, dipoles and "
+                "quadrupoles; omit 'is_periodic' to fall back to the legacy module for "
                 "induced charges/dipoles, external fields or field output"
             )
 
@@ -527,11 +512,16 @@ class Ewald_vectorized(nn.Module):
                 u = u.unsqueeze(1)  # [n_atoms, 3] -> [n_atoms, 1, 3]
             assert u.shape == (n, q.shape[1], 3), 'u dimension error, expected [n_atoms, n_q, 3]'
 
+        if quad is not None:
+            if quad.dim() == 3 and quad.shape[1] == 3:
+                quad = quad.unsqueeze(1)  # [n_atoms, 3, 3] -> [n_atoms, 1, 3, 3]
+            assert quad.shape == (n, q.shape[1], 3, 3), 'quad dimension error, expected [n_atoms, n_q, 3, 3]'
+
         if not self.is_periodic: # non-periodic
             assert cell is not None, 'fake cell needed for non-periodic case (ex. torch.zeros(n_batch, 3,3))'
-            results = self.compute_potential_realspace(r, q, cell, batch, u=u)
+            results = self.compute_potential_realspace(r, q, cell, batch, u=u, quad=quad)
         else: # periodic
-            results = self.compute_potential_triclinic(r, q, cell, batch, u=u)
+            results = self.compute_potential_triclinic(r, q, cell, batch, u=u, quad=quad)
 
         # same (pot, q_induced, u_induced) interface as the legacy module
         q_induced = torch.zeros_like(q)
@@ -541,18 +531,23 @@ class Ewald_vectorized(nn.Module):
 
 
     def compute_potential_realspace(self, r, q, cell, batch,
-                                    u: Optional[torch.Tensor] = None):
+                                    u: Optional[torch.Tensor] = None,
+                                    quad: Optional[torch.Tensor] = None):
         """
         Realspace (non-periodic) Ewald over an [N, N] pair grid (N = total
         atoms).
 
         Masks cross-batch pairs, cost is O(N^2). Handles latent monopoles and,
-        when `u` is given, latent dipoles, reproducing the charge-dipole and
-        dipole-dipole terms of the loop-based reference module.
+        when given, latent dipoles (u) and quadrupoles (quad), reproducing the
+        corresponding terms of the loop-based reference module.
+
+        The quadrupole kernels are contracted analytically to per-pair scalars
+        instead of building the [N, N, 3, 3, 3(, 3)] tensors of the reference.
         """
         device = r.device
         dtype = r.dtype
         N = r.shape[0]
+        n_q = q.shape[1]
         B = cell.shape[0]
         q = q.to(dtype=dtype)
 
@@ -575,36 +570,15 @@ class Ewald_vectorized(nn.Module):
         qq_pair = (q[pair_i] * q[pair_j_safe]).sum(dim=-1)               # [N, N]
         pot_per_pair = 0.5 * qq_pair * erf_val * rinv                    # [N, N]
 
-        if u is not None:
-            u = u.to(dtype=dtype)
-            sqrt_pi = torch.pi ** 0.5
-            rinv2 = rinv * rinv
-            rinv3 = rinv2 * rinv
-            # Gaussian damping: its argument depends on the positions, so route it
-            # through the export-safe exp (see _ExpSaveInput).
-            gauss = _ExpSaveInput.apply(-(a * a) * dist_sq)              # [N, N]
-            s1 = erf_val * rinv3 - (2.0 * a / sqrt_pi) * gauss * rinv2
-            s2 = (3.0 * erf_val * rinv3
-                  - (6.0 * a / sqrt_pi) * gauss * rinv2
-                  - (4.0 * a ** 3 / sqrt_pi) * gauss)
-
-            u_i = u[pair_i]                                              # [N, N, n_q, 3]
-            u_j = u[pair_j_safe]                                         # [N, N, n_q, 3]
-            q_j = q[pair_j_safe]                                         # [N, N, n_q]
-
-            r_ij_e = r_ij.unsqueeze(2)                                   # [N, N, 1, 3]
-
-            # charge-dipole: Σ_{i≠j} q_j (u_i · f_qu),  f_qu = s1 r_ij
-            ui_dot_r = (u_i * r_ij_e).sum(dim=-1)                        # [N, N, n_q]
-            pot_per_pair = pot_per_pair + (s1.unsqueeze(-1) * ui_dot_r * q_j).sum(dim=-1)
-
-            # dipole-dipole: -1/2 Σ_{i≠j} u_j · f_uu · u_i,
-            # with f_uu = s2 (r_ij ⊗ r_ij)/r^2 - s1 I
-            uj_dot_r = (u_j * r_ij_e).sum(dim=-1)                        # [N, N, n_q]
-            ui_dot_uj = (u_i * u_j).sum(dim=-1)                          # [N, N, n_q]
-            uu_term = (s2.unsqueeze(-1) * ui_dot_r * uj_dot_r * rinv2.unsqueeze(-1)
-                       - s1.unsqueeze(-1) * ui_dot_uj)                   # [N, N, n_q]
-            pot_per_pair = pot_per_pair - 0.5 * uu_term.sum(dim=-1)
+        # dipole/quadrupole terms, contracted per pair (see make_kernels_vectorized)
+        if u is not None or quad is not None:
+            pot_per_pair = pot_per_pair + multipole_pair_energy(
+                q=q,
+                u=u.to(dtype=dtype) if u is not None else None,
+                quad=quad.to(dtype=dtype) if quad is not None else None,
+                r_ij=r_ij, dist=dist, dist_sq=dist_sq, rinv=rinv, erf_val=erf_val,
+                sigma=self.sigma, pair_i=pair_i, pair_j=pair_j_safe,
+            )
 
         pot_per_pair = pot_per_pair * keep                               # [N, N]
 
@@ -619,17 +593,24 @@ class Ewald_vectorized(nn.Module):
             self_per_batch.scatter_add_(0, batch, q_sq_per_atom)
             pot_per_batch = pot_per_batch + self_per_batch / (self.sigma * self.twopi ** (3.0 / 2.0))
             if u is not None:
-                u_sq_per_atom = (u ** 2).sum(dim=(1, 2))   # [N]
+                u_sq_per_atom = (u ** 2).sum(dim=-1).sum(dim=-1)   # [N]
                 u_self_per_batch = torch.zeros(B, device=device, dtype=dtype)
                 u_self_per_batch.scatter_add_(0, batch, u_sq_per_atom)
                 pot_per_batch = pot_per_batch + u_self_per_batch / (
                     3.0 * self.sigma ** 3.0 * self.twopi ** (3.0 / 2.0))
+            if quad is not None:
+                quad_sq_per_atom = (quad ** 2).sum(dim=-1).sum(dim=-1).sum(dim=-1)   # [N]
+                quad_self_per_batch = torch.zeros(B, device=device, dtype=dtype)
+                quad_self_per_batch.scatter_add_(0, batch, quad_sq_per_atom)
+                pot_per_batch = pot_per_batch + quad_self_per_batch / (
+                    10.0 * self.sigma ** 5.0 * self.twopi ** (3.0 / 2.0))
 
         return pot_per_batch * self.norm_factor
     
 
     def compute_potential_triclinic(self, r, q, cell, batch,
-                                    u: Optional[torch.Tensor] = None):
+                                    u: Optional[torch.Tensor] = None,
+                                    quad: Optional[torch.Tensor] = None):
 
         device = r.device
         # single source of truth for the compute dtype: callers may hand over a
@@ -689,6 +670,14 @@ class Ewald_vectorized(nn.Module):
             S_k_real_per_atom = S_k_real_per_atom - uk * sin_exp
             S_k_imag_per_atom = S_k_imag_per_atom + uk * cos_exp
 
+        if quad is not None:
+            # quadrupoles enter the structure factor as S(k) += -1/2 (k·Q·k) e^{i k·r}
+            quad = quad.to(dtype=dtype)
+            kQ = torch.matmul(kvec_for_atoms.unsqueeze(1), quad)  # [N, n_q, K, 3]
+            qk2 = (kQ * kvec_for_atoms.unsqueeze(1)).sum(dim=-1)  # [N, n_q, K]
+            S_k_real_per_atom = S_k_real_per_atom - 0.5 * qk2 * cos_exp
+            S_k_imag_per_atom = S_k_imag_per_atom - 0.5 * qk2 * sin_exp
+
         # sum over atoms to get S_k
         S_real = torch.zeros(B, n_q, K, device=device, dtype=dtype)  # [B, n_q, K]
         S_imag = torch.zeros_like(S_real)  # [B, n_q, K]
@@ -718,6 +707,12 @@ class Ewald_vectorized(nn.Module):
                 u_self_per_batch.scatter_add_(0, index_q, (u ** 2).sum(dim=2))  # [B, n_q]
                 pot_per_batch_per_q = pot_per_batch_per_q - u_self_per_batch / (
                     3.0 * self.sigma ** 3.0 * self.twopi ** 1.5)
+            if quad is not None:
+                quad_self_per_batch = torch.zeros(B, n_q, device=device, dtype=dtype)
+                quad_self_per_batch.scatter_add_(0, index_q,
+                                                 (quad ** 2).sum(dim=-1).sum(dim=-1))
+                pot_per_batch_per_q = pot_per_batch_per_q - quad_self_per_batch / (
+                    10.0 * self.sigma ** 5.0 * self.twopi ** 1.5)
 
         pot_per_batch = pot_per_batch_per_q.sum(dim=1)  # [B]
         return pot_per_batch * self.norm_factor  # [B]
