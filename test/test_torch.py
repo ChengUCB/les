@@ -4,7 +4,7 @@ import torch
 import tempfile
 
 #load the model
-les = Les(les_arguments={})
+les = Les(les_arguments={'use_atomwise': True}) # desc is used below
 
 
 # set the same random seed for reproducibility
