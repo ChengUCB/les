@@ -411,7 +411,6 @@ class Ewald_vectorized(nn.Module):
 
         if u is not None:
             # dipoles enter the structure factor as S(k) += i (k·u) e^{i k·r}
-            # bmm rather than einsum: einsum breaks AOTInductor export
             u = u.to(dtype=dtype)
             uk = torch.bmm(u, kvec_for_atoms.transpose(1, 2))  # [N, n_q, K]
             S_k_real_per_atom = S_k_real_per_atom - uk * sin_exp
