@@ -84,6 +84,7 @@ class Les(nn.Module):
                cell: torch.Tensor, # [batch_size, 3, 3]
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
+               latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3] or [n_atoms, n_q, 3]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
                compute_bec: bool = False,
@@ -119,9 +120,13 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
+        if latent_dipoles is not None:
+            assert latent_dipoles.shape[0] == positions.shape[0]
+
         # compute the long-range interactions
         if compute_energy:
             E_lr = self.ewald(q=latent_charges,
+                              u=latent_dipoles,
                               r=positions,
                               cell=cell,
                               batch=batch,
@@ -143,6 +148,7 @@ class Les(nn.Module):
         output = {
             'E_lr': E_lr,
             'latent_charges': latent_charges,
+            'latent_dipoles': latent_dipoles,
             'BEC': bec,
             }
         return output 

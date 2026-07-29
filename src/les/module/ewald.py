@@ -6,12 +6,28 @@ import numpy as np
 
 __all__ = ['Ewald', 'Ewald_vectorized']
 
+
+class _ExpSaveInput(torch.autograd.Function):
+    """
+    exp() whose backward recomputes from the saved *input*.
+    """
+
+    @staticmethod
+    def forward(ctx, x):
+        ctx.save_for_backward(x)
+        return torch.exp(x)
+
+    @staticmethod
+    def backward(ctx, grad_out):
+        (x,) = ctx.saved_tensors
+        return grad_out * torch.exp(x)
+
 class Ewald(nn.Module):
     def __init__(self,
                  dl=2.0,  # grid resolution
                  sigma=1.0,  # width of the Gaussian on each atom
                  remove_self_interaction=True,
-                 norm_factor=90.0474,
+                 norm_factor=90.4756,
                  ):
         super().__init__()
         self.dl = dl
@@ -21,7 +37,7 @@ class Ewald(nn.Module):
         self.twopi_sq = self.twopi ** 2
         self.remove_self_interaction = remove_self_interaction
         # 1/2\epsilon_0, where \epsilon_0 is the vacuum permittivity
-        # \epsilon_0 = 5.55263*10^{-3} e^2 eV^{-1} A^{-1}
+        # \epsilon_0 = 5.52635*10^{-3} e^2 eV^{-1} A^{-1}
         self.norm_factor = norm_factor
         self.k_sq_max = (self.twopi / self.dl) ** 2
 
@@ -172,7 +188,7 @@ class Ewald_vectorized(nn.Module):
                  dl=2.0,  # grid resolution
                  sigma=1.0,  # width of the Gaussian on each atom
                  remove_self_interaction=True,
-                 norm_factor=90.0474,
+                 norm_factor=90.4756,
                  is_periodic: bool = True,
                  N_max: int = 10, # cell vector norm 20 divided by dl=2.0, increase if needed
                  ):
@@ -184,7 +200,7 @@ class Ewald_vectorized(nn.Module):
         self.twopi_sq = self.twopi ** 2
         self.remove_self_interaction = remove_self_interaction
         # 1/2\epsilon_0, where \epsilon_0 is the vacuum permittivity
-        # \epsilon_0 = 5.55263*10^{-3} e^2 eV^{-1} A^{-1}
+        # \epsilon_0 = 5.52635*10^{-3} e^2 eV^{-1} A^{-1}
         self.norm_factor = norm_factor
         self.k_sq_max = (self.twopi / self.dl) ** 2
 
@@ -220,8 +236,9 @@ class Ewald_vectorized(nn.Module):
                 r: torch.Tensor, # [n_atoms, 3]
                 cell: torch.Tensor, # [batch_size, 3, 3]
                 batch: Optional[torch.Tensor] = None,
+                u: Optional[torch.Tensor] = None, # [n_atoms, n_q, 3] or [n_atoms, 3]
                 ) -> torch.Tensor:
-        
+
         if q.dim() == 1:
             q = q.unsqueeze(1)
 
@@ -235,22 +252,30 @@ class Ewald_vectorized(nn.Module):
             batch = batch.to(device=r.device, dtype=torch.long)
 
 
+        if u is not None:
+            if u.dim() == 2 and u.shape[1] == 3:
+                u = u.unsqueeze(1)  # [n_atoms, 3] -> [n_atoms, 1, 3]
+            assert u.shape == (n, q.shape[1], 3), 'u dimension error, expected [n_atoms, n_q, 3]'
+
         if not self.is_periodic: # non-periodic
             assert cell is not None, 'fake cell needed for non-periodic case (ex. torch.zeros(n_batch, 3,3))'
-            results = self.compute_potential_realspace(r, q, cell, batch)
+            results = self.compute_potential_realspace(r, q, cell, batch, u=u)
         else: # periodic
-            results = self.compute_potential_triclinic(r, q, cell, batch)
+            results = self.compute_potential_triclinic(r, q, cell, batch, u=u)
 
         return results
     
 
 
-    def compute_potential_realspace(self, r, q, cell, batch):
+    def compute_potential_realspace(self, r, q, cell, batch,
+                                    u: Optional[torch.Tensor] = None):
         """
         Realspace (non-periodic) Ewald over an [N, N] pair grid (N = total
         atoms).
 
-        Masks cross-batch pairs, cost is O(N^2).
+        Masks cross-batch pairs, cost is O(N^2). Handles latent monopoles and,
+        when `u` is given, latent dipoles, reproducing the charge-dipole and
+        dipole-dipole terms of the loop-based reference module.
         """
         device = r.device
         dtype = r.dtype
@@ -262,37 +287,76 @@ class Ewald_vectorized(nn.Module):
         pair_i, pair_j = torch.meshgrid(idx, idx, indexing="ij")
         same_batch = batch[pair_i] == batch[pair_j]
         pair_j_safe = torch.where(same_batch, pair_j, torch.zeros_like(pair_j))
+        keep = (same_batch & (pair_i != pair_j)).to(dtype)               # [N, N]
 
-        diff = r[pair_i] - r[pair_j_safe]                                # [N, N, 3]
-        # pow(0.5)/pow(-1) rather than sqrt/division: ops whose backward reuses
-        # the forward *output* (sqrt, div, exp) break AOTInductor export when the
-        # forces are taken inside the traced forward, while pow-based forms trace
-        # fine. Mathematically identical.
-        dist_sq = diff.pow(2).sum(dim=-1).clamp(min=1e-12)               # [N, N]
+        # r_ij = r_j - r_i, the convention the reference kernels are written in
+        # (the sign matters for the odd-in-r_ij charge-dipole term).
+        r_ij = r[pair_j_safe] - r[pair_i]                                # [N, N, 3]
+        dist_sq = r_ij.pow(2).sum(dim=-1).clamp(min=1e-12)               # [N, N]
         dist = dist_sq.pow(0.5)                                          # [N, N]
-        erf_val = torch.special.erf(dist * (1.0 / (self.sigma * (2.0 ** 0.5)))) # [N, N]
+        rinv = dist.pow(-1)                                              # [N, N]
+        a = 1.0 / (self.sigma * (2.0 ** 0.5))
+        erf_val = torch.special.erf(dist * a)                            # [N, N]
 
+        # monopole-monopole: 1/2 Σ_{i≠j} q_i q_j erf(a r)/r
         qq_pair = (q[pair_i] * q[pair_j_safe]).sum(dim=-1)               # [N, N]
+        pot_per_pair = 0.5 * qq_pair * erf_val * rinv                    # [N, N]
 
-        keep = (same_batch & (pair_i != pair_j)).to(dtype)
-        pot_per_pair = qq_pair * erf_val * dist.pow(-1) * keep           # [N, N]
+        if u is not None:
+            u = u.to(dtype=dtype)
+            sqrt_pi = torch.pi ** 0.5
+            rinv2 = rinv * rinv
+            rinv3 = rinv2 * rinv
+            # Gaussian damping: its argument depends on the positions, so route it
+            # through the export-safe exp (see _ExpSaveInput).
+            gauss = _ExpSaveInput.apply(-(a * a) * dist_sq)              # [N, N]
+            s1 = erf_val * rinv3 - (2.0 * a / sqrt_pi) * gauss * rinv2
+            s2 = (3.0 * erf_val * rinv3
+                  - (6.0 * a / sqrt_pi) * gauss * rinv2
+                  - (4.0 * a ** 3 / sqrt_pi) * gauss)
+
+            u_i = u[pair_i]                                              # [N, N, n_q, 3]
+            u_j = u[pair_j_safe]                                         # [N, N, n_q, 3]
+            q_j = q[pair_j_safe]                                         # [N, N, n_q]
+
+            r_ij_e = r_ij.unsqueeze(2)                                   # [N, N, 1, 3]
+
+            # charge-dipole: Σ_{i≠j} q_j (u_i · f_qu),  f_qu = s1 r_ij
+            ui_dot_r = (u_i * r_ij_e).sum(dim=-1)                        # [N, N, n_q]
+            pot_per_pair = pot_per_pair + (s1.unsqueeze(-1) * ui_dot_r * q_j).sum(dim=-1)
+
+            # dipole-dipole: -1/2 Σ_{i≠j} u_j · f_uu · u_i,
+            # with f_uu = s2 (r_ij ⊗ r_ij)/r^2 - s1 I
+            uj_dot_r = (u_j * r_ij_e).sum(dim=-1)                        # [N, N, n_q]
+            ui_dot_uj = (u_i * u_j).sum(dim=-1)                          # [N, N, n_q]
+            uu_term = (s2.unsqueeze(-1) * ui_dot_r * uj_dot_r * rinv2.unsqueeze(-1)
+                       - s1.unsqueeze(-1) * ui_dot_uj)                   # [N, N, n_q]
+            pot_per_pair = pot_per_pair - 0.5 * uu_term.sum(dim=-1)
+
+        pot_per_pair = pot_per_pair * keep                               # [N, N]
 
         pair_batch = batch[pair_i]                                       # [N, N]
-        pot_per_batch_double = torch.zeros(B, device=device, dtype=pot_per_pair.dtype)
-        pot_per_batch_double.scatter_add_(0, pair_batch.reshape(-1), pot_per_pair.reshape(-1))
-
-        pot_per_batch = pot_per_batch_double / (self.twopi * 2.0)        # /2 for double-counting, /2π
+        pot_per_batch = torch.zeros(B, device=device, dtype=dtype)
+        pot_per_batch.scatter_add_(0, pair_batch.reshape(-1), pot_per_pair.reshape(-1))
+        pot_per_batch = pot_per_batch / self.twopi                       # 1/(4πε0) prefactor
 
         if not self.remove_self_interaction:
             q_sq_per_atom = (q ** 2).sum(dim=1)        # [N]
-            self_per_batch = torch.zeros(B, device=device, dtype=q_sq_per_atom.dtype)
+            self_per_batch = torch.zeros(B, device=device, dtype=dtype)
             self_per_batch.scatter_add_(0, batch, q_sq_per_atom)
             pot_per_batch = pot_per_batch + self_per_batch / (self.sigma * self.twopi ** (3.0 / 2.0))
+            if u is not None:
+                u_sq_per_atom = (u ** 2).sum(dim=(1, 2))   # [N]
+                u_self_per_batch = torch.zeros(B, device=device, dtype=dtype)
+                u_self_per_batch.scatter_add_(0, batch, u_sq_per_atom)
+                pot_per_batch = pot_per_batch + u_self_per_batch / (
+                    3.0 * self.sigma ** 3.0 * self.twopi ** (3.0 / 2.0))
 
         return pot_per_batch * self.norm_factor
     
 
-    def compute_potential_triclinic(self, r, q, cell, batch):
+    def compute_potential_triclinic(self, r, q, cell, batch,
+                                    u: Optional[torch.Tensor] = None):
 
         device = r.device
         # single source of truth for the compute dtype: callers may hand over a
@@ -344,6 +408,15 @@ class Ewald_vectorized(nn.Module):
 
         S_k_real_per_atom = q_exp * cos_exp  # [N, n_q, K]
         S_k_imag_per_atom = q_exp * sin_exp  # [N, n_q, K]
+
+        if u is not None:
+            # dipoles enter the structure factor as S(k) += i (k·u) e^{i k·r}
+            # bmm rather than einsum: einsum breaks AOTInductor export
+            u = u.to(dtype=dtype)
+            uk = torch.bmm(u, kvec_for_atoms.transpose(1, 2))  # [N, n_q, K]
+            S_k_real_per_atom = S_k_real_per_atom - uk * sin_exp
+            S_k_imag_per_atom = S_k_imag_per_atom + uk * cos_exp
+
         # sum over atoms to get S_k
         S_real = torch.zeros(B, n_q, K, device=device, dtype=dtype)  # [B, n_q, K]
         S_imag = torch.zeros_like(S_real)  # [B, n_q, K]
@@ -363,11 +436,16 @@ class Ewald_vectorized(nn.Module):
 
         # --- Remove self-interaction if applicable ---
         if self.remove_self_interaction:
-            q_sq_per_atom = (q ** 2).sum(dim=1)  # [N]
-            self_per_batch = torch.zeros(B, device=device, dtype=dtype)  # [B]
-            self_per_batch.scatter_add_(0, batch, q_sq_per_atom.to(dtype=self_per_batch.dtype)) # [B]
-            self_term = self_per_batch / (self.sigma * (2*torch.pi)**1.5)  # [B]
-            pot_per_batch_per_q = pot_per_batch_per_q - self_term.view(B, 1) # [B, n_q]
+            index_q = batch.view(N, 1).expand(-1, n_q)  # [N, n_q]
+            self_per_batch = torch.zeros(B, n_q, device=device, dtype=dtype)  # [B, n_q]
+            self_per_batch.scatter_add_(0, index_q, q ** 2)  # [B, n_q]
+            self_term = self_per_batch / (self.sigma * self.twopi ** 1.5)  # [B, n_q]
+            pot_per_batch_per_q = pot_per_batch_per_q - self_term  # [B, n_q]
+            if u is not None:
+                u_self_per_batch = torch.zeros(B, n_q, device=device, dtype=dtype)
+                u_self_per_batch.scatter_add_(0, index_q, (u ** 2).sum(dim=2))  # [B, n_q]
+                pot_per_batch_per_q = pot_per_batch_per_q - u_self_per_batch / (
+                    3.0 * self.sigma ** 3.0 * self.twopi ** 1.5)
 
         pot_per_batch = pot_per_batch_per_q.sum(dim=1)  # [B]
         return pot_per_batch * self.norm_factor  # [B]
