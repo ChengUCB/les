@@ -83,7 +83,7 @@ results = []
 for i in unique_batches:
     mask = batch_all == i  # Create a mask for the i-th configuration
     r_raw_now, q_now = r_all[mask], q_all[mask]
-    pot = org_ewald.compute_potential_realspace(r_raw_now, q_now)
+    pot = org_ewald.compute_potential_realspace(r_raw_now, q_now)['pot']
     results.append(pot)
 org_result = torch.stack(results, dim=0).sum(dim=1)
 print("Original function real space result:", org_result)
@@ -98,7 +98,7 @@ for i in unique_batches:
     mask = batch_all == i  # Create a mask for the i-th configuration
     r_raw_now, q_now = r_all[mask], q_all[mask]
     box_now = cells[i]  # Get the box for the i-th configuration
-    pot = org_ewald.compute_potential_triclinic(r_raw_now, q_now, box_now)
+    pot = org_ewald.compute_potential_triclinic(r_raw_now, q_now, box_now)['pot']
     results.append(pot)
 
 org_result = torch.stack(results, dim=0).sum(dim=1)

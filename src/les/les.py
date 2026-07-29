@@ -6,13 +6,16 @@ from .module import (
     Atomwise,
     Ewald,
     Ewald_vectorized,
-    BEC
+    BEC,
+    FixedCharges,
+    AtomicAlpha,
 )
 
 __all__ = ['Les']
 
 class Les(nn.Module):
 
+    __constants__ = ['use_fixed_atomic_charges', 'use_atomic_alpha', 'use_atomwise', 'use_epsilon_r_scaling']
     def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
         """
         LES model for long-range interations
@@ -27,17 +30,22 @@ class Les(nn.Module):
                     les_arguments = {}
 
         self._parse_arguments(les_arguments)
- 
+
         self.atomwise: nn.Module = (
             Atomwise(
                 n_layers=self.n_layers,
                 n_hidden=self.n_hidden,
                 add_linear_nn=self.add_linear_nn,
-                output_scaling_factor=self.output_scaling_factor, 
+                output_scaling_factor=self.output_scaling_factor,
             )
             if self.use_atomwise
             else _DummyAtomwise()
         )
+
+        if self.use_fixed_atomic_charges:
+            self.fixed_charges = FixedCharges(normalization_factor=self.fixed_atomic_charges_scaling_factor)
+        if self.use_atomic_alpha:
+            self.atomic_alpha = AtomicAlpha()
 
         if self.is_periodic is not None:
             self.ewald = Ewald_vectorized( # torch.compile compatible
@@ -46,14 +54,16 @@ class Les(nn.Module):
                 is_periodic=self.is_periodic, # True: periodic, False: non-periodic
                 N_max=self.N_max, # default 10, recommend N_max * dl > cell norm for accuracy."
                 remove_self_interaction=self.remove_self_interaction,
-            )
+                use_epsilon_r_scaling=self.use_epsilon_r_scaling,
+                )
         else:
             self.ewald = Ewald( # legacy module, not torch.compile compatible, supports mixed datasets
-                sigma=self.sigma, # default 1.0
-                dl=self.dl, # default 2.0
+                sigma=self.sigma,
+                dl=self.dl,
                 remove_self_interaction=self.remove_self_interaction,
-            )
-            
+                use_epsilon_r_scaling=self.use_epsilon_r_scaling,
+                )
+
         self.bec = BEC(
              remove_mean=self.remove_mean,
              epsilon_factor=self.epsilon_factor,
@@ -72,21 +82,50 @@ class Les(nn.Module):
         self.dl = les_arguments.get('dl', 2.0)
         self.remove_self_interaction = les_arguments.get('remove_self_interaction', True)
 
+        # set is_periodic (True/False) to use the vectorized, torch.compile
+        # compatible Ewald; leave it out for the legacy module
         self.is_periodic = les_arguments.get('is_periodic', None)
         self.N_max = les_arguments.get('N_max', 10)
 
         self.remove_mean = les_arguments.get('remove_mean', True)
         self.epsilon_factor = les_arguments.get('epsilon_factor', 1.)
         self.use_atomwise = les_arguments.get('use_atomwise', False)
+        self.use_fixed_atomic_charges = les_arguments.get('use_fixed_atomic_charges', False)
+        self.fixed_atomic_charges_scaling_factor = les_arguments.get('fixed_atomic_charges_scaling_factor', 0.5)
+        self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
+        self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
-    def forward(self, 
+    def __setstate__(self, state: Dict[str, Any]):
+        # Backward compatibility: models serialized before these feature flags
+        # existed lack the corresponding attributes. forward() and __constants__
+        # now access them directly (no hasattr), so we restore their historical
+        # defaults at deserialization time. This keeps forward() TorchScript-
+        # friendly while still loading (and scripting) older checkpoints.
+        for key, default in {
+            'use_atomwise': False,
+            'use_fixed_atomic_charges': False,
+            'use_atomic_alpha': False,
+            'use_epsilon_r_scaling': False,
+            'is_periodic': None,
+            'N_max': 10,
+        }.items():
+            state.setdefault(key, default)
+        super().__setstate__(state)
+
+    def forward(self,
                positions: torch.Tensor, # [n_atoms, 3]
                cell: torch.Tensor, # [batch_size, 3, 3]
+               e_ext: Optional[torch.Tensor]= None,
                desc: Optional[torch.Tensor]= None, # [n_atoms, n_features]
                latent_charges: Optional[torch.Tensor] = None, # [n_atoms, ]
-               latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3] or [n_atoms, n_q, 3]
+               latent_dipoles: Optional[torch.Tensor] = None, # [n_atoms, 3]
+               latent_quads: Optional[torch.Tensor] = None, # [n_atoms, 3, 3]
+               latent_kappas: Optional[torch.Tensor] = None, # [n_atoms, ]
+               latent_alphas: Optional[torch.Tensor] = None, # [n_atoms, ]
+               atomic_numbers: Optional[torch.Tensor] = None, # [n_atoms, ]
                batch: Optional[torch.Tensor] = None,
                compute_energy: bool = True,
+               compute_field: bool = False,
                compute_bec: bool = False,
                bec_output_index: Optional[int] = None, # option to compute BEC components along only one direction
                ) -> Dict[str, Optional[torch.Tensor]]:
@@ -107,7 +146,6 @@ class Les(nn.Module):
         if batch is None:
             batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)
 
-
         if latent_charges is not None:
             # check the shape of latent charges
             assert latent_charges.shape[0] == positions.shape[0]
@@ -120,23 +158,50 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
-        if latent_dipoles is not None:
-            assert latent_dipoles.shape[0] == positions.shape[0]
+        if atomic_numbers is not None and self.use_fixed_atomic_charges:
+            latent_charges = latent_charges + self.fixed_charges(atomic_numbers)
+
+        if atomic_numbers is not None and self.use_atomic_alpha and latent_alphas is not None:
+            baseline_alphas = self.atomic_alpha(atomic_numbers)
+            #print(f'baseline_alphas: {baseline_alphas}')
+            if latent_alphas.dim() == 1:
+                latent_alphas = latent_alphas + baseline_alphas
+            elif latent_alphas.dim() == 3:
+                latent_alphas = latent_alphas + baseline_alphas[:,None,None] * torch.eye(3, device=baseline_alphas.device).unsqueeze(0) # [n_atoms, 3, 3]
+
 
         # compute the long-range interactions
         if compute_energy:
-            E_lr = self.ewald(q=latent_charges,
+            E_lr, q_induced, u_induced = self.ewald(q=latent_charges,
                               u=latent_dipoles,
+                              kappa=latent_kappas,
+                              alpha=latent_alphas,
+                              quad=latent_quads,
                               r=positions,
                               cell=cell,
                               batch=batch,
+                              compute_field=compute_field,
+                              e_ext = e_ext,
                               )
         else:
-            E_lr = None
+            E_lr, q_induced, u_induced = None, None, None
+
+        if latent_alphas is not None and u_induced is not None:
+            if latent_dipoles is not None:
+                if latent_dipoles.dim() == 2 and u_induced.dim() == 3:
+                    latent_dipoles = latent_dipoles.unsqueeze(1) # [n_node, 1, 3]
+                assert latent_dipoles.shape == u_induced.shape, f'latent_dipoles dimension error'
+                latent_dipoles = latent_dipoles + u_induced
+            else:
+                latent_dipoles = u_induced
+
+        if latent_kappas is not None and q_induced is not None:
+            latent_charges = latent_charges + q_induced
 
         # compute the BEC
         if compute_bec:
             bec = self.bec(q=latent_charges,
+                           u=latent_dipoles,
                            r=positions,
                            cell=cell,
                            batch=batch,
@@ -149,9 +214,11 @@ class Les(nn.Module):
             'E_lr': E_lr,
             'latent_charges': latent_charges,
             'latent_dipoles': latent_dipoles,
+            'latent_quads': latent_quads,
+            'latent_alphas': latent_alphas,
             'BEC': bec,
             }
-        return output 
+        return output
 
 class _DummyAtomwise(nn.Module):
     def forward(self, desc: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
