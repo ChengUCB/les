@@ -59,6 +59,28 @@ class Ewald_vectorized(nn.Module):
         self.register_buffer('hemisphere_mask', hemisphere_mask, persistent=False) # [K] bool
         self.register_buffer('factors', factors, persistent=False) # [K] float
 
+    @torch.jit.ignore
+    def _check_periodicity(self, cell: Optional[torch.Tensor]) -> None:
+        """Raise if the cells disagree with is_periodic.
+        Eager only.
+        """
+        if cell is None:
+            return
+        degenerate = torch.linalg.det(cell.detach().to(torch.float64)).abs() < 1e-6
+        if self.is_periodic and bool(degenerate.any()):
+            raise ValueError(
+                "is_periodic=True but the batch contains a degenerate (near-zero "
+                "volume) cell, so there is no reciprocal lattice to sum over. Set "
+                "is_periodic=False if the cell is genuinely absent, or omit "
+                "'is_periodic' to use the legacy Ewald, which decides per structure."
+            )
+        if (not self.is_periodic) and bool((~degenerate).any()):
+            raise ValueError(
+                "is_periodic=False but the batch contains a cell with non-zero "
+                "volume, whose periodicity would be silently ignored. Set "
+                "is_periodic=True, or omit 'is_periodic' to use the legacy Ewald, "
+                "which decides per structure."
+            )
 
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
@@ -72,6 +94,9 @@ class Ewald_vectorized(nn.Module):
                 e_ext: Optional[torch.Tensor] = None,
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+
+        if not torch.jit.is_scripting() and not torch.compiler.is_compiling():
+            self._check_periodicity(cell)
 
         if q.dim() == 1:
             q = q.unsqueeze(1)
@@ -403,37 +428,37 @@ class Ewald_vectorized(nn.Module):
             S_real_at = S_real[batch]                                     # [N, n_q, K]
             S_imag_at = S_imag[batch]                                     # [N, n_q, K]
 
-        if kappa is not None or compute_field:
-            # Re[e^{-ikr} S(k)] = cos(kr) S_real + sin(kr) S_imag
-            term_real = S_real_at * cos_exp + S_imag_at * sin_exp         # [N, n_q, K]
-            # bmm rather than (prefactor * term).sum(-1): the fused reduction over
-            # the k-grid is miscompiled on the Metal backend
-            e_phi = torch.bmm(term_real, prefactor.unsqueeze(-1)).squeeze(-1) * self.norm_factor
-            if self.remove_self_interaction:
-                e_phi = e_phi - q * (2.0 / (self.sigma * self.twopi ** 1.5)) * self.norm_factor
+            if kappa is not None or compute_field:
+                # Re[e^{-ikr} S(k)] = cos(kr) S_real + sin(kr) S_imag
+                term_real = S_real_at * cos_exp + S_imag_at * sin_exp         # [N, n_q, K]
+                # bmm rather than (prefactor * term).sum(-1): the fused reduction over
+                # the k-grid is miscompiled on the Metal backend
+                e_phi = torch.bmm(term_real, prefactor.unsqueeze(-1)).squeeze(-1) * self.norm_factor
+                if self.remove_self_interaction:
+                    e_phi = e_phi - q * (2.0 / (self.sigma * self.twopi ** 1.5)) * self.norm_factor
 
-            if kappa is not None:
-                q_induced = self._get_induced_q(e_phi, kappa)
-                induced_per_batch = onehot @ (e_phi * q_induced)           # [B, n_q]
-                # pot is scaled by norm_factor at the end, e_phi already carries it
-                pot_per_batch_per_q = pot_per_batch_per_q + 0.5 * induced_per_batch / self.norm_factor
+                if kappa is not None:
+                    q_induced = self._get_induced_q(e_phi, kappa)
+                    induced_per_batch = onehot @ (e_phi * q_induced)           # [B, n_q]
+                    # pot is scaled by norm_factor at the end, e_phi already carries it
+                    pot_per_batch_per_q = pot_per_batch_per_q + 0.5 * induced_per_batch / self.norm_factor
 
-        if alpha is not None or compute_field:
-            # Im[e^{-ikr} S(k)] contributes to the field
-            term_imag = S_real_at * sin_exp - S_imag_at * cos_exp         # [N, n_q, K]
-            wf = prefactor.unsqueeze(1) * term_imag                       # [N, n_q, K]
-            # bmm rather than a broadcast product: keeps the memory at the output
-            # size and stays friendly to AOTInductor export
-            e_field = torch.bmm(wf, kvec_for_atoms) * self.norm_factor    # [N, n_q, 3]
-            if self.remove_self_interaction and u is not None:
-                a = 1.0 / (self.sigma * (2.0 ** 0.5))
-                c_self = (4.0 / (3.0 * torch.pi ** 0.5)) * (a ** 3) / self.twopi * self.norm_factor
-                e_field = e_field + c_self * u
+            if alpha is not None or compute_field:
+                # Im[e^{-ikr} S(k)] contributes to the field
+                term_imag = S_real_at * sin_exp - S_imag_at * cos_exp         # [N, n_q, K]
+                wf = prefactor.unsqueeze(1) * term_imag                       # [N, n_q, K]
+                # bmm rather than a broadcast product: keeps the memory at the output
+                # size and stays friendly to AOTInductor export
+                e_field = torch.bmm(wf, kvec_for_atoms) * self.norm_factor    # [N, n_q, 3]
+                if self.remove_self_interaction and u is not None:
+                    a = 1.0 / (self.sigma * (2.0 ** 0.5))
+                    c_self = (4.0 / (3.0 * torch.pi ** 0.5)) * (a ** 3) / self.twopi * self.norm_factor
+                    e_field = e_field + c_self * u
 
-            if alpha is not None:
-                u_induced = self._get_induced_u(e_field, alpha, e_ext)
-                induced_u_per_batch = onehot @ (e_field * u_induced).sum(dim=-1)  # [B, n_q]
-                pot_per_batch_per_q = pot_per_batch_per_q - 0.5 * induced_u_per_batch / self.norm_factor
+                if alpha is not None:
+                    u_induced = self._get_induced_u(e_field, alpha, e_ext)
+                    induced_u_per_batch = onehot @ (e_field * u_induced).sum(dim=-1)  # [B, n_q]
+                    pot_per_batch_per_q = pot_per_batch_per_q - 0.5 * induced_u_per_batch / self.norm_factor
 
         pot_per_batch = pot_per_batch_per_q.sum(dim=1)  # [B]
         return {'pot': pot_per_batch * self.norm_factor,  # [B]

@@ -166,6 +166,80 @@ def check_mixed_dtype(is_periodic, terms, label):
     return fails
 
 
+def check_torchscript(is_periodic, terms, label):
+    """J: torch.jit.script the vectorized module and run it.
+
+    Nothing else in the suite scripts this class -- the TorchScript tests build
+    Les({}), which is the legacy module -- and a refactor did silently break
+    scriptability once (a name defined in only one branch, which TorchScript
+    rejects while eager and dynamo accept it). float64, so this is about
+    scripting rather than float32 cancellation in the quadrupole kernels.
+    """
+    fails = []
+    r, q, u, quad, kappa, alpha, cells, batch = make_batched("cpu", torch.float64, is_periodic)
+    # script the Les module itself: the (E, F) wrappers call torch.autograd.grad,
+    # which is not scriptable, so the forces are taken outside the scripted call
+    les = build(is_periodic, terms, "cpu").les
+    kw = {"latent_charges": q, "cell": cells, "batch": batch, "compute_bec": False}
+    if "u" in terms:
+        kw["latent_dipoles"] = u
+    if "Q" in terms:
+        kw["latent_quads"] = quad
+    if "k" in terms:
+        kw["latent_kappas"] = kappa
+    if "a" in terms:
+        kw["latent_alphas"] = alpha
+
+    def run(module):
+        pos = r.detach().requires_grad_(True)
+        E = module(positions=pos, **kw)["E_lr"].sum()
+        return E.detach(), -torch.autograd.grad(E, pos)[0]
+
+    ref = run(les)
+    try:
+        got = run(torch.jit.script(les))
+        _report("J script", got, ref, 1e-9, 1e-9, label, fails, note="scripted vs eager")
+    except Exception as e:
+        print(f"[J script ] FAILED -> {type(e).__name__}: {str(e)[:150]}")
+        fails.append(f"{label}:torchscript-error")
+    return fails
+
+
+def check_periodicity_guard(is_periodic, terms, label):
+    """K: a cell that contradicts is_periodic must be rejected, not silently used.
+
+    The vectorized module applies one periodicity to the whole batch, so a real
+    cell with is_periodic=False would quietly drop the reciprocal sum. Deployment
+    targets that do not pass the cell make the caller substitute a zero one,
+    which is exactly this mismatch.
+    """
+    fails = []
+    _, q, u, quad, kappa, alpha, _, batch = make_batched("cpu", torch.float64, True)
+    r = torch.rand(q.shape[0], 3, dtype=torch.float64) * 8
+    cells = {
+        "degenerate": torch.zeros(3, 3, 3, dtype=torch.float64),
+        "real": torch.eye(3, dtype=torch.float64).repeat(3, 1, 1) * 10,
+    }
+    vec = build(is_periodic, terms, "cpu")
+    for kind, cell in cells.items():
+        should_raise = (kind == "degenerate") if is_periodic else (kind == "real")
+        try:
+            vec(*pack(r, q, u, quad, kappa, alpha, cell, batch, terms))
+            raised = False
+        except ValueError:
+            raised = True
+        except Exception as e:
+            print(f"[K guard  ] {kind}: unexpected {type(e).__name__}: {str(e)[:90]}")
+            fails.append(f"{label}:guard-{kind}-unexpected")
+            continue
+        ok = raised == should_raise
+        print(f"[K guard  ] {kind:10s} cell -> {'raised' if raised else 'accepted':8s}"
+              f" (want {'raise' if should_raise else 'accept'}) | {'OK' if ok else 'FAIL'}")
+        if not ok:
+            fails.append(f"{label}:guard-{kind}")
+    return fails
+
+
 def main():
     fails = []
     for is_periodic, pname in ((True, "periodic"), (False, "realspace")):
@@ -185,6 +259,8 @@ def main():
             fails += check_input_shapes(is_periodic, terms, label)
             fails += check_edge_cases(is_periodic, terms, label)
             fails += check_mixed_dtype(is_periodic, terms, label)
+            fails += check_torchscript(is_periodic, terms, label)
+            fails += check_periodicity_guard(is_periodic, terms, label)
 
     print("\n==================== SUMMARY ====================")
     if fails:
