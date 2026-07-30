@@ -1,7 +1,7 @@
 import torch
 from typing import Optional
 
-__all__ = ['multipole_pair_energy']
+__all__ = ['multipole_pair_energy', 'multipole_potential_field']
 
 
 class _ExpSaveInput(torch.autograd.Function):
@@ -133,3 +133,88 @@ def multipole_pair_energy(q: torch.Tensor,
             extra = extra - 0.5 * Qu_term.sum(dim=-1)
 
     return extra
+
+
+def multipole_potential_field(q: torch.Tensor,
+                             u: Optional[torch.Tensor],
+                             quad: Optional[torch.Tensor],
+                             r_ij: torch.Tensor,
+                             dist: torch.Tensor,
+                             dist_sq: torch.Tensor,
+                             rinv: torch.Tensor,
+                             erf_val: torch.Tensor,
+                             sigma: float,
+                             norm_const: float,
+                             pair_i: torch.Tensor,
+                             pair_j: torch.Tensor,
+                             keep: torch.Tensor,
+                             ):
+    """
+    Electrostatic potential and field at every atom, from the real-space kernels.
+
+    These feed the induced charge (-kappa * phi) and induced dipole (alpha * E)
+    terms, so unlike the pair energy they must come out in physical units --
+    norm_const is applied here.
+
+    Sums over the source index i are written as matmul/bmm rather than a masked
+    reduction: fused reductions over a large axis are miscompiled by the Metal
+    inductor backend, and einsum breaks AOTInductor export.
+
+    Returns (phi [N, n_q], field [N, n_q, 3]).
+    """
+    N, n_q = q.shape
+    a = 1.0 / (sigma * (2.0 ** 0.5))
+    sqrt_pi = torch.pi ** 0.5
+
+    rinv2 = rinv * rinv
+    rinv3 = rinv2 * rinv
+    gauss = _ExpSaveInput.apply(-(a * a) * dist_sq)
+    s1 = erf_val * rinv3 - (2.0 * a / sqrt_pi) * gauss * rinv2
+    s2 = (3.0 * erf_val * rinv3
+          - (6.0 * a / sqrt_pi) * gauss * rinv2
+          - (4.0 * a ** 3 / sqrt_pi) * gauss)
+
+    rhat = r_ij * rinv.unsqueeze(-1)                                  # [N, N, 3]
+    # contract over the source index i: [N(j), n_q, N(i)] @ [N(j), N(i), 3]
+    r_ij_j = r_ij.transpose(0, 1)                                     # [N(j), N(i), 3]
+    rhat_j = rhat.transpose(0, 1)                                     # [N(j), N(i), 3]
+
+    # --- monopole: phi = sum_i q_i erf(ar)/r,  field = sum_i q_i s1 r_ij ---
+    phi = torch.matmul((erf_val * rinv * keep).transpose(0, 1), q)     # [N, n_q]
+    w_q = (q.unsqueeze(1) * (s1 * keep).unsqueeze(-1))                 # [N(i), N(j), n_q]
+    field = torch.bmm(w_q.permute(1, 2, 0), r_ij_j)                    # [N(j), n_q, 3]
+
+    if u is not None:
+        u_i = u[pair_i]                                                # [N, N, n_q, 3]
+        ui_dot_r = (u_i * r_ij.unsqueeze(2)).sum(dim=-1)               # [N, N, n_q]
+        # phi += sum_i u_i . f_qu,  f_qu = s1 r_ij
+        phi = phi + ((s1 * keep).unsqueeze(-1) * ui_dot_r).sum(dim=0)
+        # field += sum_i f_uu . u_i = s2 (u_i.rhat) rhat - s1 u_i
+        w_u = (s2 * keep).unsqueeze(-1) * ui_dot_r * rinv.unsqueeze(-1)  # [N,N,n_q]
+        field = field + torch.bmm(w_u.permute(1, 2, 0), rhat_j)
+        field = field - torch.matmul((s1 * keep).transpose(0, 1),
+                                     u.reshape(N, n_q * 3)).reshape(N, n_q, 3)
+
+    if quad is not None:
+        rinv4 = rinv3 * rinv
+        s3 = (15.0 * erf_val * rinv4
+              - (30.0 * a / sqrt_pi) * gauss * rinv3
+              - (20.0 * a ** 3 / sqrt_pi) * gauss * rinv
+              - (8.0 * a ** 5 / sqrt_pi) * gauss * dist)
+        Qsym = quad + quad.transpose(-1, -2)                           # [N, n_q, 3, 3]
+        QTr = quad.diagonal(dim1=-2, dim2=-1).sum(dim=-1)              # [N, n_q]
+        Qr_i = (Qsym.unsqueeze(1) * rhat.unsqueeze(2).unsqueeze(2)).sum(dim=-1)  # [N,N,n_q,3]
+        QRR_i = 0.5 * (Qr_i * rhat.unsqueeze(2)).sum(dim=-1)           # [N, N, n_q]
+        QTr_i = QTr.unsqueeze(1)                                       # [N, 1, n_q]
+
+        # phi += sum_i 1/2 Q_i : f_uu
+        phi = phi + (0.5 * keep.unsqueeze(-1)
+                     * (s2.unsqueeze(-1) * QRR_i - s1.unsqueeze(-1) * QTr_i)).sum(dim=0)
+        # field += sum_i 1/2 Q_i : f_Qu
+        w_Q = 0.5 * keep.unsqueeze(-1) * (s3.unsqueeze(-1) * QRR_i
+                                          - (s2 * rinv).unsqueeze(-1) * QTr_i)
+        field = field + torch.bmm(w_Q.permute(1, 2, 0), rhat_j)
+        field = field - (0.5 * (s2 * rinv * keep).unsqueeze(-1).unsqueeze(-1)
+                         * Qr_i).sum(dim=0)
+
+    return phi * norm_const, field * norm_const

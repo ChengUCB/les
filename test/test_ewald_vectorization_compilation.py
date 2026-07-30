@@ -88,7 +88,7 @@ for i in unique_batches:
 org_result = torch.stack(results, dim=0).sum(dim=1)
 print("Original function real space result:", org_result)
 
-vec_result = vec_ewald.compute_potential_realspace(r_all, q_all, cells, batch_all)
+vec_result = vec_ewald.compute_potential_realspace(r_all, q_all, cells, batch_all)['pot']
 print("Vectorized function real space result:", vec_result)
 
 ### periodic case (reciprocal space) ###
@@ -104,7 +104,7 @@ for i in unique_batches:
 org_result = torch.stack(results, dim=0).sum(dim=1)
 print("Original function reciprocal space result:", org_result)
 
-vec_result = vec_ewald.compute_potential_triclinic(r_all, q_all, cells, batch_all)
+vec_result = vec_ewald.compute_potential_triclinic(r_all, q_all, cells, batch_all)['pot']
 print("Vectorized function reciprocal space result:", vec_result)
 
 

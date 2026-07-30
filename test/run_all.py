@@ -32,7 +32,8 @@ PYTEST_TARGETS = [
 
 # script targets: (path, extra argv). A script fails only if it raises / exits nonzero.
 SCRIPT_TARGETS = [
-    ("test/test_dipole_ewald_vectorization_compilation.py", []),  # vectorized + compile + AOTI gates
+    ("test/test_ewald_vectorized_physics.py", []),                # vectorized physics vs legacy/main
+    ("test/test_ewald_vectorized_compile.py", []),                # torch.compile + AOTInductor gates
     ("test/test_ewald_vectorization_compilation.py", []),         # legacy vs vectorized
     ("test/test_torch.py", []),
     ("test/test_torch_dipole.py", []),
@@ -50,7 +51,9 @@ SCRIPT_TARGETS = [
 
 def env():
     e = os.environ.copy()
-    e["PYTHONPATH"] = SRC + (os.pathsep + e["PYTHONPATH"] if e.get("PYTHONPATH") else "")
+    # src/ so the checked-out LES is tested, test/ for the shared _vec_harness
+    extra = SRC + os.pathsep + os.path.join(REPO, "test")
+    e["PYTHONPATH"] = extra + (os.pathsep + e["PYTHONPATH"] if e.get("PYTHONPATH") else "")
     return e
 
 

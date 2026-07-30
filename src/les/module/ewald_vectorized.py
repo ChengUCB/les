@@ -2,7 +2,10 @@ import torch
 import torch.nn as nn
 from typing import Optional, Tuple
 
-from les.module.make_kernels_vectorized import multipole_pair_energy
+from les.module.make_kernels_vectorized import (
+    multipole_pair_energy,
+    multipole_potential_field,
+)
 
 __all__ = ['Ewald_vectorized']
 
@@ -70,14 +73,6 @@ class Ewald_vectorized(nn.Module):
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-        # terms not vectorized yet: use the legacy module (omit is_periodic) for these
-        if kappa is not None or alpha is not None or e_ext is not None or compute_field:
-            raise NotImplementedError(
-                "the vectorized Ewald currently supports latent charges, dipoles and "
-                "quadrupoles; omit 'is_periodic' to fall back to the legacy module for "
-                "induced charges/dipoles, external fields or field output"
-            )
-
         if q.dim() == 1:
             q = q.unsqueeze(1)
 
@@ -103,20 +98,63 @@ class Ewald_vectorized(nn.Module):
 
         if not self.is_periodic: # non-periodic
             assert cell is not None, 'fake cell needed for non-periodic case (ex. torch.zeros(n_batch, 3,3))'
-            results = self.compute_potential_realspace(r, q, cell, batch, u=u, quad=quad)
+            out = self.compute_potential_realspace(r, q, cell, batch, u=u, quad=quad,
+                                                   kappa=kappa, alpha=alpha, e_ext=e_ext,
+                                                   compute_field=compute_field)
         else: # periodic
-            results = self.compute_potential_triclinic(r, q, cell, batch, u=u, quad=quad)
-
+            out = self.compute_potential_triclinic(r, q, cell, batch, u=u, quad=quad,
+                                                   kappa=kappa, alpha=alpha, e_ext=e_ext,
+                                                   compute_field=compute_field)
         # same (pot, q_induced, u_induced) interface as the legacy module
-        q_induced = torch.zeros_like(q)
-        u_induced = torch.zeros((n, q.shape[1], 3), device=r.device, dtype=r.dtype)
-        return results, q_induced, u_induced
+        return out['pot'], out['q_induced'], out['u_induced']
     
 
 
+    def _get_induced_q(self, e_phi, kappa):
+        if kappa.dim() == 1:
+            kappa = kappa.unsqueeze(1)
+        assert kappa.dim() == 2, 'kappa dimension error'
+        return - kappa.to(dtype=e_phi.dtype) * e_phi  # [N, n_q]
+
+    def _get_induced_u(self, e_field, alpha, e_ext: Optional[torch.Tensor] = None):
+        if e_ext is not None:
+            e_field = e_field + e_ext.to(dtype=e_field.dtype)[None, None, :]
+        alpha = alpha.to(dtype=e_field.dtype)
+        if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3, 3)):
+            alpha = alpha.unsqueeze(1)
+        if alpha.dim() == 2:  # isotropic
+            return e_field * alpha.unsqueeze(2)  # [N, n_q, 3]
+        elif alpha.dim() == 4 and alpha.shape[2:4] == (3, 3):  # anisotropic
+            # sum_c e_field[i,q,c] alpha[i,q,c,d]; broadcast rather than einsum,
+            # which breaks AOTInductor export
+            return (e_field.unsqueeze(-1) * alpha).sum(dim=2)  # [N, n_q, 3]
+        else:
+            raise ValueError('alpha dimension error')
+
+    def _get_epsilon_r(self, alpha, volume, batch, B: int, n_q: int):
+        """Susceptibility-based relative permittivity, per configuration."""
+        epsilon_0 = 0.00552635  # e^2 eV^{-1} A^{-1}
+        alpha = alpha.to(dtype=volume.dtype)
+        if alpha.dim() == 1 or (alpha.dim() == 3 and alpha.shape[1:3] == (3, 3)):
+            alpha = alpha.unsqueeze(1)
+        if alpha.dim() == 2:  # isotropic, [N, n_q]
+            per_atom = alpha
+        elif alpha.dim() == 4 and alpha.shape[2:4] == (3, 3):  # anisotropic
+            per_atom = alpha.diagonal(dim1=-2, dim2=-1).sum(dim=-1) / 3.0  # [N, n_q]
+        else:
+            raise ValueError('alpha dimension error')
+        index_q = batch.view(-1, 1).expand(-1, n_q)
+        summed = torch.zeros(B, n_q, device=alpha.device, dtype=volume.dtype)
+        summed.scatter_add_(0, index_q, per_atom)
+        return summed / volume.view(B, 1) / epsilon_0 + 1.0  # [B, n_q]
+
     def compute_potential_realspace(self, r, q, cell, batch,
                                     u: Optional[torch.Tensor] = None,
-                                    quad: Optional[torch.Tensor] = None):
+                                    quad: Optional[torch.Tensor] = None,
+                                    kappa: Optional[torch.Tensor] = None,
+                                    alpha: Optional[torch.Tensor] = None,
+                                    e_ext: Optional[torch.Tensor] = None,
+                                    compute_field: bool = False):
         """
         Realspace (non-periodic) Ewald over an [N, N] pair grid (N = total
         atoms).
@@ -189,12 +227,57 @@ class Ewald_vectorized(nn.Module):
                 pot_per_batch = pot_per_batch + quad_self_per_batch / (
                     10.0 * self.sigma ** 5.0 * self.twopi ** (3.0 / 2.0))
 
-        return pot_per_batch * self.norm_factor
+        # --- induced charges / dipoles from the real-space potential and field ---
+        q_induced = torch.zeros(N, n_q, device=device, dtype=dtype)
+        u_induced = torch.zeros(N, n_q, 3, device=device, dtype=dtype)
+        e_phi = torch.zeros(N, n_q, device=device, dtype=dtype)
+        e_field = torch.zeros(N, n_q, 3, device=device, dtype=dtype)
+
+        if kappa is not None or alpha is not None or compute_field:
+            norm_const = self.norm_factor / self.twopi
+            e_phi, e_field = multipole_potential_field(
+                q=q,
+                u=u.to(dtype=dtype) if u is not None else None,
+                quad=quad.to(dtype=dtype) if quad is not None else None,
+                r_ij=r_ij, dist=dist, dist_sq=dist_sq, rinv=rinv, erf_val=erf_val,
+                sigma=self.sigma, norm_const=norm_const,
+                pair_i=pair_i, pair_j=pair_j_safe, keep=keep,
+            )
+            # the real-space sum already excludes i == j, so the self terms are
+            # added back here when they are meant to be kept
+            if not self.remove_self_interaction:
+                e_phi = e_phi + q * (2.0 / (self.sigma * self.twopi ** 1.5)) * self.norm_factor
+                if u is not None:
+                    c_self = (4.0 / (3.0 * torch.pi ** 0.5)) * (a ** 3) * norm_const
+                    e_field = e_field - c_self * u.to(dtype=dtype)
+
+            # one-hot segment sum: a reduction feeding scatter_add_ is miscompiled
+            onehot = (batch.unsqueeze(0)
+                      == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
+            if kappa is not None:
+                q_induced = self._get_induced_q(e_phi, kappa)
+                # pot_per_batch is in units of physical energy / norm_factor
+                pot_per_batch = pot_per_batch + 0.5 * (
+                    onehot @ (e_phi * q_induced)).sum(dim=1) / self.norm_factor
+            if alpha is not None:
+                u_induced = self._get_induced_u(e_field, alpha, e_ext)
+                pot_per_batch = pot_per_batch - 0.5 * (
+                    onehot @ (e_field * u_induced).sum(dim=-1)).sum(dim=1) / self.norm_factor
+
+        return {'pot': pot_per_batch * self.norm_factor,  # [B]
+                'q_induced': q_induced,
+                'u_induced': u_induced,
+                'phi': e_phi,
+                'field': e_field}
     
 
     def compute_potential_triclinic(self, r, q, cell, batch,
                                     u: Optional[torch.Tensor] = None,
-                                    quad: Optional[torch.Tensor] = None):
+                                    quad: Optional[torch.Tensor] = None,
+                                    kappa: Optional[torch.Tensor] = None,
+                                    alpha: Optional[torch.Tensor] = None,
+                                    e_ext: Optional[torch.Tensor] = None,
+                                    compute_field: bool = False):
 
         device = r.device
         # single source of truth for the compute dtype: callers may hand over a
@@ -212,6 +295,12 @@ class Ewald_vectorized(nn.Module):
         # --- 1. Reciprocal lattice G_b = 2π (M_b^{-1})^T ---
         cell_inv = torch.linalg.inv(cell) # [B, 3, 3]
         G = 2 * torch.pi * cell_inv.transpose(-2, -1)  # [B, 3, 3], G = 2π(M^{-1}).T
+
+        volume = torch.det(cell)  # [B]
+        if alpha is not None and self.use_epsilon_r_scaling:
+            epsilon_r = self._get_epsilon_r(alpha, volume, batch, B, n_q)  # [B, n_q]
+        else:
+            epsilon_r = torch.ones(B, n_q, device=device, dtype=dtype)
 
         # --- 2. kvec[b, k, :] = nvec[k, :] @ G[b, :, :] ---
         nvec_expanded = nvec.unsqueeze(0).expand(B, -1, -1)  # [B, K, 3]
@@ -276,7 +365,6 @@ class Ewald_vectorized(nn.Module):
         w = weight.unsqueeze(1)  # [B, 1, K]
         contrib = w * S_k_sq  # [B, n_q, K]
 
-        volume = torch.det(cell)  # [B]
         pot_per_batch_per_q = contrib.sum(dim=-1) / volume.view(B, 1)  # [B, n_q]
 
         # --- Remove self-interaction if applicable ---
@@ -298,5 +386,59 @@ class Ewald_vectorized(nn.Module):
                 pot_per_batch_per_q = pot_per_batch_per_q - quad_self_per_batch / (
                     10.0 * self.sigma ** 5.0 * self.twopi ** 1.5)
 
+        # --- induced charges / dipoles from the reciprocal-space potential ---
+        q_induced = torch.zeros(N, n_q, device=device, dtype=dtype)
+        u_induced = torch.zeros(N, n_q, 3, device=device, dtype=dtype)
+        e_phi = torch.zeros(N, n_q, device=device, dtype=dtype)
+        e_field = torch.zeros(N, n_q, 3, device=device, dtype=dtype)
+
+        if kappa is not None or alpha is not None or compute_field:
+            # one-hot segment sum for the induced energies: a reduction feeding
+            # scatter_add_ is miscompiled by inductor (see the self terms), and a
+            # plain matmul avoids the scatter altogether
+            onehot = (batch.unsqueeze(0)
+                      == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
+            # prefactor = factors * 2 kfac / V, gathered onto the atoms
+            prefactor = (weight * 2.0 / volume.view(B, 1))[batch]         # [N, K]
+            S_real_at = S_real[batch]                                     # [N, n_q, K]
+            S_imag_at = S_imag[batch]                                     # [N, n_q, K]
+
+        if kappa is not None or compute_field:
+            # Re[e^{-ikr} S(k)] = cos(kr) S_real + sin(kr) S_imag
+            term_real = S_real_at * cos_exp + S_imag_at * sin_exp         # [N, n_q, K]
+            # bmm rather than (prefactor * term).sum(-1): the fused reduction over
+            # the k-grid is miscompiled on the Metal backend
+            e_phi = torch.bmm(term_real, prefactor.unsqueeze(-1)).squeeze(-1) * self.norm_factor
+            if self.remove_self_interaction:
+                e_phi = e_phi - q * (2.0 / (self.sigma * self.twopi ** 1.5)) * self.norm_factor
+
+            if kappa is not None:
+                q_induced = self._get_induced_q(e_phi, kappa)
+                induced_per_batch = onehot @ (e_phi * q_induced)           # [B, n_q]
+                # pot is scaled by norm_factor at the end, e_phi already carries it
+                pot_per_batch_per_q = pot_per_batch_per_q + 0.5 * induced_per_batch / self.norm_factor
+
+        if alpha is not None or compute_field:
+            # Im[e^{-ikr} S(k)] contributes to the field
+            term_imag = S_real_at * sin_exp - S_imag_at * cos_exp         # [N, n_q, K]
+            wf = prefactor.unsqueeze(1) * term_imag                       # [N, n_q, K]
+            # bmm rather than a broadcast product: keeps the memory at the output
+            # size and stays friendly to AOTInductor export
+            e_field = torch.bmm(wf, kvec_for_atoms) * self.norm_factor    # [N, n_q, 3]
+            if self.remove_self_interaction and u is not None:
+                a = 1.0 / (self.sigma * (2.0 ** 0.5))
+                c_self = (4.0 / (3.0 * torch.pi ** 0.5)) * (a ** 3) / self.twopi * self.norm_factor
+                e_field = e_field + c_self * u
+
+            if alpha is not None:
+                u_induced = self._get_induced_u(e_field, alpha, e_ext)
+                induced_u_per_batch = onehot @ (e_field * u_induced).sum(dim=-1)  # [B, n_q]
+                pot_per_batch_per_q = pot_per_batch_per_q - 0.5 * induced_u_per_batch / self.norm_factor
+
         pot_per_batch = pot_per_batch_per_q.sum(dim=1)  # [B]
-        return pot_per_batch * self.norm_factor  # [B]
+        return {'pot': pot_per_batch * self.norm_factor,  # [B]
+                'q_induced': q_induced,
+                'u_induced': u_induced,
+                'phi': e_phi,
+                'field': e_field,
+                'epsilon_r': epsilon_r}
