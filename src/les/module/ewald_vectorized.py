@@ -67,14 +67,19 @@ class Ewald_vectorized(nn.Module):
         if cell is None:
             return
         degenerate = torch.linalg.det(cell.detach().to(torch.float64)).abs() < 1e-6
-        if self.is_periodic and bool(degenerate.any()):
+        try:
+            any_degenerate = bool(degenerate.any())
+            any_periodic = bool((~degenerate).any())
+        except Exception:
+            return
+        if self.is_periodic and any_degenerate:
             raise ValueError(
                 "is_periodic=True but the batch contains a degenerate (near-zero "
                 "volume) cell, so there is no reciprocal lattice to sum over. Set "
                 "is_periodic=False if the cell is genuinely absent, or omit "
                 "'is_periodic' to use the legacy Ewald, which decides per structure."
             )
-        if (not self.is_periodic) and bool((~degenerate).any()):
+        if (not self.is_periodic) and any_periodic:
             raise ValueError(
                 "is_periodic=False but the batch contains a cell with non-zero "
                 "volume, whose periodicity would be silently ignored. Set "
@@ -199,14 +204,12 @@ class Ewald_vectorized(nn.Module):
         q = q.to(dtype=dtype)
 
         idx = torch.arange(N, device=device, dtype=torch.long)
-        pair_i, pair_j = torch.meshgrid(idx, idx, indexing="ij")
-        same_batch = batch[pair_i] == batch[pair_j]
-        pair_j_safe = torch.where(same_batch, pair_j, torch.zeros_like(pair_j))
-        keep = (same_batch & (pair_i != pair_j)).to(dtype)               # [N, N]
+        same_batch = batch.unsqueeze(1) == batch.unsqueeze(0)            # [N, N]
+        keep = (same_batch & (idx.unsqueeze(1) != idx.unsqueeze(0))).to(dtype)
 
         # r_ij = r_j - r_i, the convention the reference kernels are written in
         # (the sign matters for the odd-in-r_ij charge-dipole term).
-        r_ij = r[pair_j_safe] - r[pair_i]                                # [N, N, 3]
+        r_ij = r.unsqueeze(0) - r.unsqueeze(1)                           # [N, N, 3]
         dist_sq = r_ij.pow(2).sum(dim=-1).clamp(min=1e-12)               # [N, N]
         dist = dist_sq.pow(0.5)                                          # [N, N]
         rinv = dist.pow(-1)                                              # [N, N]
@@ -214,7 +217,7 @@ class Ewald_vectorized(nn.Module):
         erf_val = torch.special.erf(dist * a)                            # [N, N]
 
         # monopole-monopole: 1/2 Σ_{i≠j} q_i q_j erf(a r)/r
-        qq_pair = (q[pair_i] * q[pair_j_safe]).sum(dim=-1)               # [N, N]
+        qq_pair = (q.unsqueeze(1) * q.unsqueeze(0)).sum(dim=-1)           # [N, N]
         pot_per_pair = 0.5 * qq_pair * erf_val * rinv                    # [N, N]
 
         # dipole/quadrupole terms, contracted per pair (see make_kernels_vectorized)
@@ -224,12 +227,12 @@ class Ewald_vectorized(nn.Module):
                 u=u.to(dtype=dtype) if u is not None else None,
                 quad=quad.to(dtype=dtype) if quad is not None else None,
                 r_ij=r_ij, dist=dist, dist_sq=dist_sq, rinv=rinv, erf_val=erf_val,
-                sigma=self.sigma, pair_i=pair_i, pair_j=pair_j_safe,
+                sigma=self.sigma,
             )
 
         pot_per_pair = pot_per_pair * keep                               # [N, N]
 
-        pair_batch = batch[pair_i]                                       # [N, N]
+        pair_batch = batch.unsqueeze(1).expand(N, N)                     # [N, N]
         pot_per_batch = torch.zeros(B, device=device, dtype=dtype)
         pot_per_batch.scatter_add_(0, pair_batch.reshape(-1), pot_per_pair.reshape(-1))
         pot_per_batch = pot_per_batch / self.twopi                       # 1/(4πε0) prefactor
@@ -266,7 +269,7 @@ class Ewald_vectorized(nn.Module):
                 quad=quad.to(dtype=dtype) if quad is not None else None,
                 r_ij=r_ij, dist=dist, dist_sq=dist_sq, rinv=rinv, erf_val=erf_val,
                 sigma=self.sigma, norm_const=norm_const,
-                pair_i=pair_i, pair_j=pair_j_safe, keep=keep,
+                keep=keep,
             )
             # the real-space sum already excludes i == j, so the self terms are
             # added back here when they are meant to be kept

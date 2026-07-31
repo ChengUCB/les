@@ -29,8 +29,6 @@ def multipole_pair_energy(q: torch.Tensor,
                           rinv: torch.Tensor,
                           erf_val: torch.Tensor,
                           sigma: float,
-                          pair_i: torch.Tensor,
-                          pair_j: torch.Tensor,
                           ) -> torch.Tensor:
     """
     Per-pair energy of the dipole/quadrupole real-space terms, on an [N, N] grid.
@@ -58,7 +56,12 @@ def multipole_pair_energy(q: torch.Tensor,
           - (6.0 * a / sqrt_pi) * gauss * rinv2
           - (4.0 * a ** 3 / sqrt_pi) * gauss)
 
-    q_j = q[pair_j]                                                  # [N, N, n_q]
+    # the multipoles enter by broadcasting over the pair grid rather than by
+    # gathering with an [N, N] index: the backward of such a gather is a
+    # scatter-add, which the inductor CPU backend fails to vectorize (an
+    # AssertionError in its atomic_add codegen), and broadcasting backs up to a
+    # plain reduction instead
+    q_j = q.unsqueeze(0)                                             # [1, N, n_q]
     r_ij_e = r_ij.unsqueeze(2)                                       # [N, N, 1, 3]
     rhat = r_ij * rinv.unsqueeze(-1)                                 # [N, N, 3]
     rhat_e = rhat.unsqueeze(2)                                       # [N, N, 1, 3]
@@ -68,8 +71,8 @@ def multipole_pair_energy(q: torch.Tensor,
     u_j = torch.zeros(0, device=q.device, dtype=q.dtype)
 
     if u is not None:
-        u_i = u[pair_i]                                              # [N, N, n_q, 3]
-        u_j = u[pair_j]                                              # [N, N, n_q, 3]
+        u_i = u.unsqueeze(1)                                         # [N, 1, n_q, 3]
+        u_j = u.unsqueeze(0)                                         # [1, N, n_q, 3]
 
         # charge-dipole: q_j (u_i . f_qu),  f_qu = s1 r_ij
         ui_dot_r = (u_i * r_ij_e).sum(dim=-1)                        # [N, N, n_q]
@@ -145,8 +148,6 @@ def multipole_potential_field(q: torch.Tensor,
                              erf_val: torch.Tensor,
                              sigma: float,
                              norm_const: float,
-                             pair_i: torch.Tensor,
-                             pair_j: torch.Tensor,
                              keep: torch.Tensor,
                              ):
     """
@@ -185,7 +186,7 @@ def multipole_potential_field(q: torch.Tensor,
     field = torch.bmm(w_q.permute(1, 2, 0), r_ij_j)                    # [N(j), n_q, 3]
 
     if u is not None:
-        u_i = u[pair_i]                                                # [N, N, n_q, 3]
+        u_i = u.unsqueeze(1)                                           # [N, 1, n_q, 3]
         ui_dot_r = (u_i * r_ij.unsqueeze(2)).sum(dim=-1)               # [N, N, n_q]
         # phi += sum_i u_i . f_qu,  f_qu = s1 r_ij
         phi = phi + ((s1 * keep).unsqueeze(-1) * ui_dot_r).sum(dim=0)
