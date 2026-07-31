@@ -149,6 +149,46 @@ def check_no_self_removal(is_periodic, terms, label):
     return fails
 
 
+def check_latent_grads(is_periodic, label):
+    """L: differentiate the latent multipoles too, in float64 on the CPU.
+
+    Gates B-E differentiate positions only, but in a trained model every
+    multipole is a network output, so the deployed graph carries their backward
+    as well -- and float64 is what nequip runs by default. That combination is
+    not just a shape detail: the backward of a gather over the [N, N] pair grid
+    is a scatter-add, and the inductor CPU backend fails to vectorize it, which
+    made every non-periodic model unexportable while all the gates above passed.
+    """
+    import _vec_harness as H
+    fails = []
+    dev = torch.device("cpu")   # this is the backend the codegen gap lives in
+
+    def _build():
+        vec = H.build(is_periodic, "all-grads", dev)
+        args = H.pack_all_grads(*H.make_single(dev, torch.float64, 6, is_periodic))
+        return vec, args, vec(*args)
+
+    def body_compile(_dev):
+        vec, args, ref = _build()
+        cvec = torch.compile(vec, fullgraph=True, dynamic=False)
+        _report("L lat-cmp", cvec(*args), ref, 1e-9, 1e-9, label, fails,
+                note="compiled vs eager (f64)")
+
+    def body_aoti(_dev):
+        vec, args, ref = _build()
+        nat = torch.export.Dim("natoms", min=2, max=1 << 20)
+        dyn = {n: ({0: nat} if n != "cell" else None) for n in H.ARG_NAMES["all-grads"]}
+        ep = torch.export.export(vec, args, dynamic_shapes=dyn)
+        aoti = torch._inductor.aoti_load_package(
+            torch._inductor.aoti_compile_and_package(ep))
+        _report("L lat-aoti", aoti(*args), ref, 1e-9, 1e-9, label, fails,
+                note="dynamic aoti vs eager (f64)")
+
+    _gate_once("L lat-cmp ", f"{label}:latent-grad-compile", fails, body_compile)
+    _gate_once("L lat-aoti", f"{label}:latent-grad-aoti", fails, body_aoti)
+    return fails
+
+
 # TERMS still to add: induced charges (-iq), induced dipoles (-iu) and
 # epsilon_r scaling -> extend WRAPPERS/ARG_NAMES/pack and the reference call.
 
@@ -164,6 +204,9 @@ def main():
                 fails += check_compile_export(is_periodic, terms, label, n_q=2)
             fails += check_dynamic(is_periodic, terms, label)
             fails += check_no_self_removal(is_periodic, terms, label)
+        # once per periodicity: the full term set with every multipole
+        # differentiated, which is the shape of a real model's graph
+        fails += check_latent_grads(is_periodic, f"{pname} [latent-grads]")
 
     print("\n==================== SUMMARY ====================")
     if fails:

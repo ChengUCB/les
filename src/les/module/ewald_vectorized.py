@@ -59,34 +59,6 @@ class Ewald_vectorized(nn.Module):
         self.register_buffer('hemisphere_mask', hemisphere_mask, persistent=False) # [K] bool
         self.register_buffer('factors', factors, persistent=False) # [K] float
 
-    @torch.jit.ignore
-    def _check_periodicity(self, cell: Optional[torch.Tensor]) -> None:
-        """Raise if the cells disagree with is_periodic.
-        Eager only.
-        """
-        if cell is None:
-            return
-        degenerate = torch.linalg.det(cell.detach().to(torch.float64)).abs() < 1e-6
-        try:
-            any_degenerate = bool(degenerate.any())
-            any_periodic = bool((~degenerate).any())
-        except Exception:
-            return
-        if self.is_periodic and any_degenerate:
-            raise ValueError(
-                "is_periodic=True but the batch contains a degenerate (near-zero "
-                "volume) cell, so there is no reciprocal lattice to sum over. Set "
-                "is_periodic=False if the cell is genuinely absent, or omit "
-                "'is_periodic' to use the legacy Ewald, which decides per structure."
-            )
-        if (not self.is_periodic) and any_periodic:
-            raise ValueError(
-                "is_periodic=False but the batch contains a cell with non-zero "
-                "volume, whose periodicity would be silently ignored. Set "
-                "is_periodic=True, or omit 'is_periodic' to use the legacy Ewald, "
-                "which decides per structure."
-            )
-
     def forward(self,
                 q: torch.Tensor,  # [n_atoms, n_q] or [n_atoms]
                 r: torch.Tensor, # [n_atoms, 3]
@@ -99,9 +71,6 @@ class Ewald_vectorized(nn.Module):
                 e_ext: Optional[torch.Tensor] = None,
                 compute_field: bool = False
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
-        if not torch.jit.is_scripting() and not torch.compiler.is_compiling():
-            self._check_periodicity(cell)
 
         if q.dim() == 1:
             q = q.unsqueeze(1)

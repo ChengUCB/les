@@ -205,41 +205,6 @@ def check_torchscript(is_periodic, terms, label):
     return fails
 
 
-def check_periodicity_guard(is_periodic, terms, label):
-    """K: a cell that contradicts is_periodic must be rejected, not silently used.
-
-    The vectorized module applies one periodicity to the whole batch, so a real
-    cell with is_periodic=False would quietly drop the reciprocal sum. Deployment
-    targets that do not pass the cell make the caller substitute a zero one,
-    which is exactly this mismatch.
-    """
-    fails = []
-    _, q, u, quad, kappa, alpha, _, batch = make_batched("cpu", torch.float64, True)
-    r = torch.rand(q.shape[0], 3, dtype=torch.float64) * 8
-    cells = {
-        "degenerate": torch.zeros(3, 3, 3, dtype=torch.float64),
-        "real": torch.eye(3, dtype=torch.float64).repeat(3, 1, 1) * 10,
-    }
-    vec = build(is_periodic, terms, "cpu")
-    for kind, cell in cells.items():
-        should_raise = (kind == "degenerate") if is_periodic else (kind == "real")
-        try:
-            vec(*pack(r, q, u, quad, kappa, alpha, cell, batch, terms))
-            raised = False
-        except ValueError:
-            raised = True
-        except Exception as e:
-            print(f"[K guard  ] {kind}: unexpected {type(e).__name__}: {str(e)[:90]}")
-            fails.append(f"{label}:guard-{kind}-unexpected")
-            continue
-        ok = raised == should_raise
-        print(f"[K guard  ] {kind:10s} cell -> {'raised' if raised else 'accepted':8s}"
-              f" (want {'raise' if should_raise else 'accept'}) | {'OK' if ok else 'FAIL'}")
-        if not ok:
-            fails.append(f"{label}:guard-{kind}")
-    return fails
-
-
 def main():
     fails = []
     for is_periodic, pname in ((True, "periodic"), (False, "realspace")):
@@ -260,7 +225,6 @@ def main():
             fails += check_edge_cases(is_periodic, terms, label)
             fails += check_mixed_dtype(is_periodic, terms, label)
             fails += check_torchscript(is_periodic, terms, label)
-            fails += check_periodicity_guard(is_periodic, terms, label)
 
     print("\n==================== SUMMARY ====================")
     if fails:

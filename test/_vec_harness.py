@@ -37,7 +37,15 @@ for _lim, _val in (("cache_size_limit", 128), ("accumulated_cache_size_limit", 4
 
 # Known gaps: reported but do NOT hard-fail, so "green" means "everything
 # currently supported works". Remove a tag once fixed.
-KNOWN_GAPS = set()
+KNOWN_GAPS = {
+    # AOTInductor export of the PERIODIC path fails ("fake tensor in the exported
+    # program constant's list") once the latent multipoles are differentiated as
+    # well as the positions -- some op on the reciprocal-space path reuses its own
+    # output in its backward. It does not block deployment: `nequip-compile`
+    # exports periodic models fine, because inference only needs dE/dr. Kept as a
+    # gate so it is not forgotten, and so a fix is noticed.
+    "periodic [latent-grads]:latent-grad-aoti",
+}
 
 SIGMA, DL = 1.0, 2.0
 # atoms per configuration for the batched inputs; the compile test shrinks this
@@ -204,15 +212,46 @@ class WrapFull(torch.nn.Module):
         return E.detach(), F
 
 
+class WrapLatentGrad(torch.nn.Module):
+    """Differentiates with respect to the latent multipoles, not just positions.
+
+    In a trained model every multipole is a network output, so the deployed graph
+    also contains their backward. The wrappers above differentiate positions
+    only, and that blind spot hid a real failure: the backward of the [N, N]
+    gather in the real-space pair grid is a scatter-add that the inductor CPU
+    backend could not vectorize, so no non-periodic model could be exported with
+    AOTInductor even though every gate here passed.
+
+    All gradients are returned as one flat vector so the shared comparison helper
+    can check them in the slot it uses for forces.
+    """
+    def __init__(self, is_periodic):
+        super().__init__()
+        self.les = _les(is_periodic)
+
+    def forward(self, positions, latent_charges, latent_dipoles, latent_quads,
+                latent_kappas, latent_alphas, cell, batch):
+        E = self.les(positions=positions, latent_charges=latent_charges,
+                     latent_dipoles=latent_dipoles, latent_quads=latent_quads,
+                     latent_kappas=latent_kappas, latent_alphas=latent_alphas,
+                     cell=cell, batch=batch, compute_bec=False)["E_lr"].sum()
+        grads = torch.autograd.grad(
+            E, [positions, latent_charges, latent_dipoles, latent_quads,
+                latent_kappas, latent_alphas])
+        return E.detach(), torch.cat([g.reshape(-1) for g in grads])
+
+
 # term sets exercised end to end; extend as further multipoles land
 WRAPPERS = {"q": WrapQ, "q+u": WrapQU, "q+u+Q": WrapQUQuad,
-            "q+u+Q+k+a": WrapFull}
+            "q+u+Q+k+a": WrapFull, "all-grads": WrapLatentGrad}
 ARG_NAMES = {
     "q": ["positions", "latent_charges", "cell", "batch"],
     "q+u": ["positions", "latent_charges", "latent_dipoles", "cell", "batch"],
     "q+u+Q": ["positions", "latent_charges", "latent_dipoles", "latent_quads",
               "cell", "batch"],
     "q+u+Q+k+a": ["positions", "latent_charges", "latent_dipoles", "latent_quads",
+                  "latent_kappas", "latent_alphas", "cell", "batch"],
+    "all-grads": ["positions", "latent_charges", "latent_dipoles", "latent_quads",
                   "latent_kappas", "latent_alphas", "cell", "batch"],
 }
 
@@ -232,6 +271,17 @@ def pack(r, q, u, quad, kappa, alpha, cell, batch, terms):
     if terms == "q+u+Q":
         return (r, q, u, quad, cell, batch)
     return (r, q, u, quad, kappa, alpha, cell, batch)
+
+
+def pack_all_grads(r, q, u, quad, kappa, alpha, cell, batch):
+    """Args for WrapLatentGrad: every multipole is a differentiable input."""
+    return (r.detach().requires_grad_(True),
+            q.detach().requires_grad_(True),
+            u.detach().requires_grad_(True),
+            quad.detach().requires_grad_(True),
+            kappa.detach().requires_grad_(True),
+            alpha.detach().requires_grad_(True),
+            cell, batch)
 
 
 def _close(a, b, rtol, atol):
