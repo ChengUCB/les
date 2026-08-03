@@ -37,13 +37,22 @@ Here you can find MLIP packages **with LES implementation** presented in [*A Uni
 | **MatGL**  | [github.com/ChengUCB/matgl](https://github.com/ChengUCB/matgl) |
 
 
-**Example training scripts** for these LES-augmented MLIPs can be found in [https://github.com/ChengUCB/les_fit].
+**Example training scripts** for these LES-augmented MLIPs can be found in [https://github.com/ChengUCB/les_fit] and [https://github.com/ChengUCB/extended_les_fit].
 
 **Hyperparameters selection:** The default parameters (i.e. without setting anything) usually work well. 
 One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self_interaction=True' is the default and is the most robust choice.
 'remove_self_interaction=False' can sometimes yield a bit better training accuracy, but is less robust when training on finite systems and then extrapolate to periodic systems.
 
 ## 📣 Update 
+
+### 31st Jul 2026
+Now the extended **LES (Latent Ewald Summation)** ([https://github.com/ChengUCB/les](https://github.com/ChengUCB/les)) with multipoles is fully torch.jit.script-friendly.
+
+### 29th Jul 2026
+The updated MACE branch with multipoles is now merged with ACEsuit/main (please check the [commit](https://github.com/ACEsuit/mace/commit/e333ae6b61932a3d67dfc7eba20e962ec01a3ce4)).
+
+You can now use [`ACEsuit/main`](https://github.com/ACEsuit/mace/tree/main), and it's fully backward compatible with the trained potentials from our own branch.
+
 [2025-10] The **`MACELES`** model has been implemented in the main [**MACE** repository](https://github.com/ACEsuit/mace). Example training and evaluation scripts are available in [les_fit](https://github.com/ChengUCB/les_fit/tree/main/MLIPs/MACE-LES-new).
 
 ## License
