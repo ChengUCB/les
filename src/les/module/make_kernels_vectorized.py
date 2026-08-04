@@ -50,7 +50,14 @@ def multipole_pair_energy(q: torch.Tensor,
     rinv2 = rinv * rinv
     rinv3 = rinv2 * rinv
     # the Gaussian argument depends on the positions, so use the export-safe exp
-    gauss = _ExpSaveInput.apply(-(a * a) * dist_sq)                   # [N, N]
+    # TorchScript cannot compile a custom autograd.Function, so it gets the plain
+    # exp; is_scripting() folds to a constant at compile time and the other branch is
+    # pruned. Eager and AOTInductor keep _ExpSaveInput, whose backward recomputes exp
+    # from the saved input rather than reusing the output (which breaks AOTI export).
+    if torch.jit.is_scripting():
+        gauss = torch.exp(-(a * a) * dist_sq)
+    else:
+        gauss = _ExpSaveInput.apply(-(a * a) * dist_sq)
     s1 = erf_val * rinv3 - (2.0 * a / sqrt_pi) * gauss * rinv2
     s2 = (3.0 * erf_val * rinv3
           - (6.0 * a / sqrt_pi) * gauss * rinv2
@@ -179,7 +186,11 @@ def multipole_potential_field(q: torch.Tensor,
 
     rinv2 = rinv * rinv
     rinv3 = rinv2 * rinv
-    gauss = _ExpSaveInput.apply(-(a * a) * dist_sq)
+    # see multipole_pair_energy
+    if torch.jit.is_scripting():
+        gauss = torch.exp(-(a * a) * dist_sq)
+    else:
+        gauss = _ExpSaveInput.apply(-(a * a) * dist_sq)
     s1 = erf_val * rinv3 - (2.0 * a / sqrt_pi) * gauss * rinv2
     s2 = (3.0 * erf_val * rinv3
           - (6.0 * a / sqrt_pi) * gauss * rinv2

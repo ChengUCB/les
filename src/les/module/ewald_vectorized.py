@@ -333,7 +333,16 @@ class Ewald_vectorized(nn.Module):
         weight = weight * valid_mask.to(dtype=weight.dtype) # [B, K]
 
         # --- 5. Structure factor S(k) = Σ_i q_i e^{i k·r_i} ---
-        kvec_for_atoms = kvec[batch] # [N, K, 3]
+        # Broadcast per-configuration quantities onto the atoms with a one-hot matmul
+        # instead of indexing with `batch`. The backward of such a gather is an
+        # atomic_add scatter, and the inductor CPU backend cannot vectorise it once the
+        # atom count is dynamic ("assert index.is_vec") -- which is how LAMMPS calls an
+        # AOTInductor-exported model.
+        onehot = (batch.unsqueeze(0)
+                  == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
+        onehot_t = onehot.transpose(0, 1)                                    # [N, B]
+        kvec_for_atoms = torch.matmul(
+            onehot_t, kvec.reshape(B, K * 3)).reshape(N, K, 3)               # [N, K, 3]
         k_dot_r = (kvec_for_atoms * r.unsqueeze(1)).sum(dim=-1)  # [N, K]
         #for torchscript compatibility, to avoid dtype mismatch, only use real part
         cos_k_dot_r = torch.cos(k_dot_r) # [N, K]
@@ -367,8 +376,6 @@ class Ewald_vectorized(nn.Module):
         # what the physics asks for, but the inductor CPU backend cannot vectorise
         # the atomic_add it emits ("assert index.is_vec") once the atom count is
         # dynamic, which is exactly how LAMMPS calls an AOTInductor-exported model.
-        onehot = (batch.unsqueeze(0)
-                  == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
         S_real = torch.matmul(onehot,
                               S_k_real_per_atom.reshape(N, n_q * K)).reshape(B, n_q, K)
         S_imag = torch.matmul(onehot,
@@ -408,18 +415,16 @@ class Ewald_vectorized(nn.Module):
         e_field = torch.zeros(N, n_q, 3, device=device, dtype=dtype)
 
         if kappa is not None or alpha is not None or compute_field:
-            # one-hot segment sum for the induced energies: a reduction feeding
-            # scatter_add_ is miscompiled by inductor (see the self terms), and a
-            # plain matmul avoids the scatter altogether
-            onehot = (batch.unsqueeze(0)
-                      == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
-            # prefactor = factors * 2 kfac / V, gathered onto the atoms
-            prefactor = (weight * 2.0 / volume.view(B, 1))[batch]         # [N, K]
+            # prefactor = factors * 2 kfac / V, broadcast onto the atoms (`onehot` and
+            # `onehot_t` come from the structure-factor sum above; a matmul with them
+            # also serves as the segment sum for the induced energies, where a
+            # reduction feeding scatter_add_ is miscompiled by inductor)
+            prefactor = torch.matmul(
+                onehot_t, weight * 2.0 / volume.view(B, 1))               # [N, K]
             # broadcast each configuration's structure factor back to its atoms with
             # the transposed one-hot rather than S_real[batch]: the backward of that
             # gather is the same atomic_add scatter the inductor CPU backend cannot
             # vectorise under dynamic shapes
-            onehot_t = onehot.transpose(0, 1)                             # [N, B]
             S_real_at = torch.matmul(
                 onehot_t, S_real.reshape(B, n_q * K)).reshape(N, n_q, K)
             S_imag_at = torch.matmul(
