@@ -174,12 +174,22 @@ class Ewald_vectorized(nn.Module):
 
         idx = torch.arange(N, device=device, dtype=torch.long)
         same_batch = batch.unsqueeze(1) == batch.unsqueeze(0)            # [N, N]
-        keep = (same_batch & (idx.unsqueeze(1) != idx.unsqueeze(0))).to(dtype)
+        keep_pair = same_batch & (idx.unsqueeze(1) != idx.unsqueeze(0))  # [N, N] bool
+        keep = keep_pair.to(dtype)
 
         # r_ij = r_j - r_i, the convention the reference kernels are written in
         # (the sign matters for the odd-in-r_ij charge-dipole term).
         r_ij = r.unsqueeze(0) - r.unsqueeze(1)                           # [N, N, 3]
-        dist_sq = r_ij.pow(2).sum(dim=-1).clamp(min=1e-12)               # [N, N]
+        # Excluded pairs (i == j, and pairs from different configurations) are
+        # masked out by `keep` below, but they must not blow up on the way there:
+        # i == j has zero separation, and a clamped 1e-12 gives rinv**5 ~ 1e30,
+        # which overflows float32 once the quadrupole kernels multiply it out. The
+        # mask then turns inf into NaN, and the NaN reaches the gradients -- which
+        # is what made compiled non-periodic training diverge while eager did not.
+        # Hand those entries a harmless unit separation instead.
+        dist_sq = torch.where(keep_pair,
+                              r_ij.pow(2).sum(dim=-1).clamp(min=1e-12),
+                              torch.ones_like(r_ij[..., 0]))            # [N, N]
         dist = dist_sq.pow(0.5)                                          # [N, N]
         rinv = dist.pow(-1)                                              # [N, N]
         a = 1.0 / (self.sigma * (2.0 ** 0.5))
@@ -199,7 +209,10 @@ class Ewald_vectorized(nn.Module):
                 sigma=self.sigma,
             )
 
-        pot_per_pair = pot_per_pair * keep                               # [N, N]
+        # where, not a 0/1 multiply: an excluded pair can carry an inf and
+        # inf * 0 is NaN (ChengUCB/les#11), in the backward as much as the forward
+        pot_per_pair = torch.where(keep_pair, pot_per_pair,
+                                   torch.zeros((), device=device, dtype=dtype))
 
         pair_batch = batch.unsqueeze(1).expand(N, N)                     # [N, N]
         pot_per_batch = torch.zeros(B, device=device, dtype=dtype)
@@ -238,7 +251,7 @@ class Ewald_vectorized(nn.Module):
                 quad=quad.to(dtype=dtype) if quad is not None else None,
                 r_ij=r_ij, dist=dist, dist_sq=dist_sq, rinv=rinv, erf_val=erf_val,
                 sigma=self.sigma, norm_const=norm_const,
-                keep=keep,
+                keep_pair=keep_pair,
             )
             # the real-space sum already excludes i == j, so the self terms are
             # added back here when they are meant to be kept

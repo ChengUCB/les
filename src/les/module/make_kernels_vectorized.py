@@ -148,7 +148,7 @@ def multipole_potential_field(q: torch.Tensor,
                              erf_val: torch.Tensor,
                              sigma: float,
                              norm_const: float,
-                             keep: torch.Tensor,
+                             keep_pair: torch.Tensor,   # [N, N] bool
                              ):
     """
     Electrostatic potential and field at every atom, from the real-space kernels.
@@ -161,8 +161,18 @@ def multipole_potential_field(q: torch.Tensor,
     reduction: fused reductions over a large axis are miscompiled by the Metal
     inductor backend, and einsum breaks AOTInductor export.
 
+    Excluded pairs are removed with `torch.where`, never by multiplying with a 0/1
+    mask: a masked-out entry can still carry an inf (its separation is zero), and
+    inf * 0 is NaN, which no later masking can clean up again -- see
+    ChengUCB/les#11. `where` also blocks the backward, so a non-finite gradient in
+    the excluded branch cannot reach the parameters either.
+
     Returns (phi [N, n_q], field [N, n_q, 3]).
     """
+    zero = torch.zeros((), device=q.device, dtype=q.dtype)
+    m2 = keep_pair                                    # [N, N]
+    m3 = keep_pair.unsqueeze(-1)                      # [N, N, 1]
+    m4 = m3.unsqueeze(-1)                             # [N, N, 1, 1]
     N, n_q = q.shape
     a = 1.0 / (sigma * (2.0 ** 0.5))
     sqrt_pi = torch.pi ** 0.5
@@ -181,19 +191,19 @@ def multipole_potential_field(q: torch.Tensor,
     rhat_j = rhat.transpose(0, 1)                                     # [N(j), N(i), 3]
 
     # --- monopole: phi = sum_i q_i erf(ar)/r,  field = sum_i q_i s1 r_ij ---
-    phi = torch.matmul((erf_val * rinv * keep).transpose(0, 1), q)     # [N, n_q]
-    w_q = (q.unsqueeze(1) * (s1 * keep).unsqueeze(-1))                 # [N(i), N(j), n_q]
+    phi = torch.matmul(torch.where(m2, erf_val * rinv, zero).transpose(0, 1), q)     # [N, n_q]
+    w_q = (q.unsqueeze(1) * torch.where(m2, s1, zero).unsqueeze(-1))                 # [N(i), N(j), n_q]
     field = torch.bmm(w_q.permute(1, 2, 0), r_ij_j)                    # [N(j), n_q, 3]
 
     if u is not None:
         u_i = u.unsqueeze(1)                                           # [N, 1, n_q, 3]
         ui_dot_r = (u_i * r_ij.unsqueeze(2)).sum(dim=-1)               # [N, N, n_q]
         # phi += sum_i u_i . f_qu,  f_qu = s1 r_ij
-        phi = phi + ((s1 * keep).unsqueeze(-1) * ui_dot_r).sum(dim=0)
+        phi = phi + (torch.where(m2, s1, zero).unsqueeze(-1) * ui_dot_r).sum(dim=0)
         # field += sum_i f_uu . u_i = s2 (u_i.rhat) rhat - s1 u_i
-        w_u = (s2 * keep).unsqueeze(-1) * ui_dot_r * rinv.unsqueeze(-1)  # [N,N,n_q]
+        w_u = torch.where(m2, s2, zero).unsqueeze(-1) * ui_dot_r * rinv.unsqueeze(-1)  # [N,N,n_q]
         field = field + torch.bmm(w_u.permute(1, 2, 0), rhat_j)
-        field = field - torch.matmul((s1 * keep).transpose(0, 1),
+        field = field - torch.matmul(torch.where(m2, s1, zero).transpose(0, 1),
                                      u.reshape(N, n_q * 3)).reshape(N, n_q, 3)
 
     if quad is not None:
@@ -209,13 +219,13 @@ def multipole_potential_field(q: torch.Tensor,
         QTr_i = QTr.unsqueeze(1)                                       # [N, 1, n_q]
 
         # phi += sum_i 1/2 Q_i : f_uu
-        phi = phi + (0.5 * keep.unsqueeze(-1)
-                     * (s2.unsqueeze(-1) * QRR_i - s1.unsqueeze(-1) * QTr_i)).sum(dim=0)
+        phi = phi + (0.5 * torch.where(m3, s2.unsqueeze(-1) * QRR_i
+                                       - s1.unsqueeze(-1) * QTr_i, zero)).sum(dim=0)
         # field += sum_i 1/2 Q_i : f_Qu
-        w_Q = 0.5 * keep.unsqueeze(-1) * (s3.unsqueeze(-1) * QRR_i
-                                          - (s2 * rinv).unsqueeze(-1) * QTr_i)
+        w_Q = 0.5 * torch.where(m3, s3.unsqueeze(-1) * QRR_i
+                                - (s2 * rinv).unsqueeze(-1) * QTr_i, zero)
         field = field + torch.bmm(w_Q.permute(1, 2, 0), rhat_j)
-        field = field - (0.5 * (s2 * rinv * keep).unsqueeze(-1).unsqueeze(-1)
-                         * Qr_i).sum(dim=0)
+        field = field - (0.5 * torch.where(m4, (s2 * rinv).unsqueeze(-1).unsqueeze(-1)
+                                          * Qr_i, zero)).sum(dim=0)
 
     return phi * norm_const, field * norm_const
