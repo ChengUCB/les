@@ -362,12 +362,17 @@ class Ewald_vectorized(nn.Module):
             S_k_imag_per_atom = S_k_imag_per_atom - 0.5 * qk2 * sin_exp
 
         # sum over atoms to get S_k
-        S_real = torch.zeros(B, n_q, K, device=device, dtype=dtype)  # [B, n_q, K]
-        S_imag = torch.zeros_like(S_real)  # [B, n_q, K]
-
-        index = batch.view(N, 1, 1).expand(-1, n_q, K)  # [N, n_q, K]
-        S_real = S_real.scatter_add_(0, index, S_k_real_per_atom)
-        S_imag = S_imag.scatter_add_(0, index, S_k_imag_per_atom)
+        # Sum the per-atom structure factors into their configuration with a one-hot
+        # matmul rather than scatter_add_ over an [N, n_q, K] index. The scatter is
+        # what the physics asks for, but the inductor CPU backend cannot vectorise
+        # the atomic_add it emits ("assert index.is_vec") once the atom count is
+        # dynamic, which is exactly how LAMMPS calls an AOTInductor-exported model.
+        onehot = (batch.unsqueeze(0)
+                  == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
+        S_real = torch.matmul(onehot,
+                              S_k_real_per_atom.reshape(N, n_q * K)).reshape(B, n_q, K)
+        S_imag = torch.matmul(onehot,
+                              S_k_imag_per_atom.reshape(N, n_q * K)).reshape(B, n_q, K)
         S_k_sq = S_real.pow(2) + S_imag.pow(2)  # [B, n_q, K]
 
 
@@ -410,8 +415,15 @@ class Ewald_vectorized(nn.Module):
                       == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
             # prefactor = factors * 2 kfac / V, gathered onto the atoms
             prefactor = (weight * 2.0 / volume.view(B, 1))[batch]         # [N, K]
-            S_real_at = S_real[batch]                                     # [N, n_q, K]
-            S_imag_at = S_imag[batch]                                     # [N, n_q, K]
+            # broadcast each configuration's structure factor back to its atoms with
+            # the transposed one-hot rather than S_real[batch]: the backward of that
+            # gather is the same atomic_add scatter the inductor CPU backend cannot
+            # vectorise under dynamic shapes
+            onehot_t = onehot.transpose(0, 1)                             # [N, B]
+            S_real_at = torch.matmul(
+                onehot_t, S_real.reshape(B, n_q * K)).reshape(N, n_q, K)
+            S_imag_at = torch.matmul(
+                onehot_t, S_imag.reshape(B, n_q * K)).reshape(N, n_q, K)
 
             if kappa is not None or compute_field:
                 # Re[e^{-ikr} S(k)] = cos(kr) S_real + sin(kr) S_imag

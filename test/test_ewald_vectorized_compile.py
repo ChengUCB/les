@@ -43,6 +43,17 @@ def _gate_once(gate, tag, fails, body):
             fails.append(f"{tag}-error")
 
 
+def _compile_gate(gate, tag, fails, body, retry=True):
+    """A torch.compile gate, skipped when this torch cannot trace autograd.grad."""
+    if not _vec_harness.CAN_TRACE_AUTOGRAD:
+        print(f"[{gate}] SKIPPED (needs torch._dynamo.config.trace_autograd_ops)")
+        return
+    if retry:
+        _gate_with_retry(gate, tag, fails, body)
+    else:
+        _gate_once(gate, tag, fails, body)
+
+
 def _gate_with_retry(gate, tag, fails, body):
     """Run body(device); if the backend fails to build the kernel, retry on the
     CPU and say so. `body` reports its own comparison via _report."""
@@ -85,7 +96,7 @@ def check_compile_export(is_periodic, terms, label, n_q=1):
         _report("C aoti", aoti(*args), ref, 1e-4, 1e-4, label, fails,
                 note=f"aoti vs eager ({dev.type})")
 
-    _gate_with_retry("B compile", f"{label}:compile", fails, body_compile)
+    _compile_gate("B compile", f"{label}:compile", fails, body_compile)
     _gate_once("C aoti   ", f"{label}:aoti", fails, body_aoti)
     return fails
 
@@ -119,7 +130,7 @@ def check_dynamic(is_periodic, terms, label):
         _report("E dyn-aoti", aoti(*a2), ref, 1e-4, 1e-4, label, fails,
                 note=f"N{N1}->N{N2} vs eager ({dev.type})")
 
-    _gate_with_retry("D dyn-cmp ", f"{label}:dynamic-compile", fails, body_compile)
+    _compile_gate("D dyn-cmp ", f"{label}:dynamic-compile", fails, body_compile)
     _gate_once("E dyn-aoti", f"{label}:dynamic-aoti", fails, body_aoti)
     return fails
 
@@ -143,7 +154,7 @@ def check_no_self_removal(is_periodic, terms, label):
                 note=f"compiled vs eager ({dev.type})")
 
     try:
-        _gate_with_retry("G no-rsi ", f"{label}:no-self-removal", fails, body)
+        _compile_gate("G no-rsi ", f"{label}:no-self-removal", fails, body)
     finally:
         H.REMOVE_SELF_INTERACTION = True
     return fails
@@ -184,7 +195,7 @@ def check_latent_grads(is_periodic, label):
         _report("L lat-aoti", aoti(*args), ref, 1e-9, 1e-9, label, fails,
                 note="dynamic aoti vs eager (f64)")
 
-    _gate_once("L lat-cmp ", f"{label}:latent-grad-compile", fails, body_compile)
+    _compile_gate("L lat-cmp ", f"{label}:latent-grad-compile", fails, body_compile, retry=False)
     _gate_once("L lat-aoti", f"{label}:latent-grad-aoti", fails, body_aoti)
     return fails
 

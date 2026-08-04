@@ -20,11 +20,17 @@ from les.module import Ewald_vectorized
 print(f"[info] les from: {les.__file__}")
 
 # Compiling a forward that calls torch.autograd.grad (force = -dE/dr) requires
-# dynamo to trace through the autograd op. AOTInductor handles it natively.
-try:
+# dynamo to trace through the autograd op, which it only does with this flag. Older
+# torch (2.9, 2.10) has no such flag and refuses with "Attempted to call function
+# marked as skipped", so the torch.compile gates are skipped there rather than
+# reported as failures. AOTInductor -- the deployment path -- handles autograd.grad
+# natively and is checked on every version.
+CAN_TRACE_AUTOGRAD = hasattr(torch._dynamo.config, "trace_autograd_ops")
+if CAN_TRACE_AUTOGRAD:
     torch._dynamo.config.trace_autograd_ops = True
-except Exception:
-    pass
+else:
+    print(f"[info] torch {torch.__version__} cannot compile a forward calling "
+          f"autograd.grad; torch.compile gates will be skipped (AOTInductor still runs)")
 # this harness compiles the same wrapper classes under many configurations; the
 # default cache_size_limit of 8 is reached and, with fullgraph=True, dynamo then
 # hard-fails instead of falling back. Raise it rather than resetting between
