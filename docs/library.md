@@ -39,7 +39,7 @@ energy = out["E_lr"]              # add this to your short-range energy
 | argument | shape | notes |
 |---|---|---|
 | `positions` | `[n_atoms, 3]` | required |
-| `cell` | `[n_structures, 3, 3]` | required, even for isolated systems -- see below |
+| `cell` | `[n_structures, 3, 3]` | always required. For a non-periodic system LES ignores it, but pass a finite box rather than zeros -- a host MLIP that divides by the cell volume (for the stress) otherwise produces non-finite values |
 | `batch` | `[n_atoms]` | defaults to a single structure |
 | `latent_charges` | `[n_atoms]` | your model's per-atom scalar |
 | `latent_dipoles` | `[n_atoms, 3]` | optional, must be equivariant |

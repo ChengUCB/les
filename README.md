@@ -3,6 +3,12 @@
 ## Summary
 
 The Latent Ewald Summation (LES) library is a plug-in to add long-range interactions to short-ranged machine learning interatomic potentials.
+
+## Documentation
+
+**[les.readthedocs.io](https://les.readthedocs.io)** — how LES works, using the library
+directly, and per-MLIP guides for MACE, CACE, NequIP and Allegro.
+
 ## Requirements
 
 - Python 3.6 or higher
