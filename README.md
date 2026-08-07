@@ -51,6 +51,11 @@ One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self
 
 ## 📣 Update 
 
+
+### 6th Aug 2026
+Now the extended **LES (Latent Ewald Summation)** with multipoles is fully torch.compile-friendly.
+Documents are added.
+
 ### 31st Jul 2026
 Now the extended **LES (Latent Ewald Summation)** ([https://github.com/ChengUCB/les](https://github.com/ChengUCB/les)) with multipoles is fully torch.jit.script-friendly.
 
