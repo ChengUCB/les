@@ -1,8 +1,8 @@
 # Using the LES library directly
 
-You do not need NequIP to use LES. The library is a single `torch.nn.Module` that takes
+The library is a single `torch.nn.Module` that takes
 positions, a cell, and per-atom multipoles, and returns the long-range energy. This page is
-for adding LES to your own model. If your MLIP already has LES, use its own page:
+for adding LES to your own model. For already implemented MLIPs with LES, please check own page:
 [MACE](mace.md), [CACE](cace.md), [NequIP or Allegro](nequip.md).
 
 ## Install
@@ -39,13 +39,13 @@ energy = out["E_lr"]              # add this to your short-range energy
 | argument | shape | notes |
 |---|---|---|
 | `positions` | `[n_atoms, 3]` | required |
-| `cell` | `[n_structures, 3, 3]` | always required. For a non-periodic system LES ignores it, but pass a finite box rather than zeros -- a host MLIP that divides by the cell volume (for the stress) otherwise produces non-finite values |
+| `cell` | `[n_structures, 3, 3]` | |
 | `batch` | `[n_atoms]` | defaults to a single structure |
 | `latent_charges` | `[n_atoms]` | your model's per-atom scalar |
 | `latent_dipoles` | `[n_atoms, 3]` | optional, must be equivariant |
 | `latent_quads` | `[n_atoms, 3, 3]` | optional, must be equivariant |
 | `latent_kappas` | `[n_atoms]` | optional |
-| `latent_alphas` | `[n_atoms]` or `[n_atoms, 3, 3]` | optional, dipole polarizability |
+| `latent_alphas` | `[n_atoms]` or `[n_atoms, 3, 3]` | optional, can be scalar or tensor |
 | `atomic_numbers` | `[n_atoms]` | needed by `use_fixed_atomic_charges` / `use_atomic_alpha` |
 | `e_ext` | | optional external field |
 | `desc` | `[n_atoms, n_features]` | descriptors, instead of `latent_charges` -- requires `use_atomwise: True`, and LES predicts the charges itself with its own MLP |
@@ -86,7 +86,7 @@ These belong to the library and are shared by every host MLIP:
 | `sigma` | `1.0` | Width (Å) of the Gaussian each latent charge is smeared over, and the Ewald splitting parameter. |
 | `dl` | `2.0` | Resolution of the reciprocal-space sum (Å): the cutoff is `k_max = 2*pi/dl`. The default corresponds to `k_c = pi`. |
 | `N_max` | `10` | Extent of the integer k-grid per direction. Keep `N_max * dl` above the cell's longest side. Periodic only. |
-| `remove_self_interaction` | `True` | Subtract each charge's interaction with its own Gaussian. |
+| `remove_self_interaction` | `True` | Subtract each charge's interaction with its own Gaussian. `True` is the most robust choice. `False` can sometimes yield slightly better training accuracy, but is less robust when training on finite systems and then extrapolating to periodic ones. |
 
 ```{note}
 We have checked that the default `sigma` and `dl` converge in essentially every case we have
@@ -96,13 +96,12 @@ tried, and they are what the published fits use. Changing them is not recommende
 For what the choice of implementation means for `torch.compile` and deployment, see
 [Ewald implementations](https://nequip-les.readthedocs.io/en/latest/guide/ewald.html) in the NequIP-LES documentation.
 
-## Hyperparameters
+## Recovering physical BECs
 
-The defaults usually work. The one worth trying differently is `remove_self_interaction`:
-
-> `remove_self_interaction=True` is the default and is the most robust choice.
-> `remove_self_interaction=False` can sometimes yield a bit better training accuracy, but is
-> less robust when training on finite systems and then extrapolating to periodic systems.
+The learned quantities are scaled by the electronic screening, so the BECs come out scaled too.
+Set `epsilon_factor` (the high-frequency permittivity) when `compute_bec=True` to get physically
+meaningful values, or leave it and rescale afterwards -- these are constants, so post-processing
+is equivalent.
 
 ## Other MLIPs with LES
 

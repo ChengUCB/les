@@ -9,7 +9,7 @@ $$E^\text{sr} = \sum_{i=1}^{N} E_i$$
 with $r_c$ typically around 5 to 6 Å. Electrostatics does not fit in that form: a Coulomb
 interaction decays as $1/r$.
 
-## The idea: latent charges
+## The idea
 
 LES splits the energy in two,
 
@@ -49,7 +49,7 @@ $$q_i^\text{les} = \frac{q_i}{\sqrt{\varepsilon_e}}, \qquad
 
 and only the vacuum permittivity enters the Ewald sum. $\varepsilon_e$ therefore never has to be
 considered while training or predicting energies and forces -- it appears only when recovering
-unscaled physical quantities such as BECs and polarizabilities:
+unscaled physical quantities such as BECs and polarizabilities ([Kim, King, Park et al. 2026](https://arxiv.org/abs/2605.05746)):
 
 * $\varepsilon_e = 1$ for a system in vacuum, such as an isolated molecule;
 * $\varepsilon_e = \varepsilon_\infty$, the high-frequency (electronic) dielectric constant, for a
@@ -72,7 +72,7 @@ $$E^\text{lr} = \frac{1}{2}\frac{1}{4\pi\varepsilon_0}\sum_{i=1}^{N}\sum_{j=1}^{
 At short range the kernel tends to a constant rather than diverging -- the Gaussian overlap
 removes the singularity. This matters for more than numerics: the long-range term is *smooth
 and weak* exactly where the short-range model is already accurate, so the two do not fight
-over the same physics. $\sigma$ is where the handover happens.
+over the same physics.
 
 **Periodic systems** are summed in reciprocal space:
 
@@ -121,8 +121,7 @@ $$\Delta\mathbf{u}_i = \boldsymbol{\alpha}_i\cdot\mathbf{E}(\mathbf{r}_i), \qqua
 U_i^\text{iu} = -\tfrac{1}{2}\mathbf{E}(\mathbf{r}_i)\cdot\boldsymbol{\alpha}_i\cdot\mathbf{E}(\mathbf{r}_i)$$
 
 so the charge distribution is no longer a function of geometry alone -- it reacts to the
-electrostatics it is itself generating. This is what lets one model describe dielectric
-screening, and it avoids the cubic cost that a Qeq matrix inversion brings.
+electrostatics it is itself generating.
 
 The total is assembled as
 
@@ -166,8 +165,7 @@ $\varepsilon_e$: for a model without induced dipoles the two coincide, and when 
 present $\varepsilon_e$ is derived from $\varepsilon_\infty$ by the relation above.
 
 BECs are the strongest evidence that the latent charges are not a fitting artefact: they are a
-response property that never appeared in training, they agree with DFT to a few hundredths of
-an electron, and they converge *faster* with training-set size than the forces do.
+response property that never appeared in training, they agree with DFT, and they converge *faster* with training-set size than the forces do ([Kim & Cheng 2026](https://doi.org/10.1063/5.0316886)).
 
 ```{warning}
 The periodic expression needs a single high-frequency permittivity $\varepsilon_\infty$ for a
@@ -196,11 +194,11 @@ Two limitations are worth knowing before you rely on it:
 
 | paper | what it covers |
 |---|---|
-| [Latent Ewald summation for machine learning of long-range interactions](https://www.nature.com/articles/s41524-025-01577-7) | the method |
-| [Machine learning of charges and long-range interactions from energies and forces](https://www.nature.com/articles/s41467-025-63852-x) | why energies and forces alone suffice |
+| [Latent Ewald summation for machine learning of long-range interactions](https://www.nature.com/articles/s41524-025-01577-7) | the original paper, method |
+| [Machine learning of charges and long-range interactions from energies and forces](https://www.nature.com/articles/s41467-025-63852-x) | benchmarks, why energies and forces alone suffice |
 | [Machine learning interatomic potential can infer electrical response](https://doi.org/10.1038/s41524-025-01911-z) | BECs, IR spectra, finite-field MD |
 | [A universal augmentation framework for long-range electrostatics in MLIPs](https://pubs.acs.org/doi/10.1021/acs.jctc.5c01400) | the MLIP-agnostic formulation this package implements |
-| [Long-range electrostatics for MLIPs is easier than we thought](https://doi.org/10.1063/5.0316886) | the design principles, and where LES sits among the alternatives |
+| [Long-range electrostatics for MLIPs is easier than we thought](https://doi.org/10.1063/5.0316886) | the LES design principles, and where LES sits among the alternatives |
 | [Polarizable atomic multipoles for learning long-range electrostatics](https://arxiv.org/abs/2605.05746) | the multipole and response terms |
 
 Full entries under [Citation](citation.md).

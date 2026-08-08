@@ -66,3 +66,43 @@ cace_nnp = NeuralNetworkPotential(
 Forces are taken from the *total* energy, so they include the long-range contribution. The
 Ewald parameters (`sigma`, `dl`, `is_periodic`, `N_max`) are `LesWrapper` arguments and default
 to the values in [Ewald parameters](library.md#ewald-parameters).
+
+## Monopoles only
+
+For the original LES -- latent charges and nothing else -- drop `TensorReadout` entirely and
+give `LesWrapper` no multipole keys:
+
+```python
+les_e = LesWrapper(energy_key='ewald_potential',
+                   compute_bec=False,)
+
+cace_nnp = NeuralNetworkPotential(
+    representation=cace_representation,
+    output_modules=[les_e, sr_energy, e_add, forces],
+)
+```
+
+## Born effective charges
+
+BECs are not computed during training. Turn them on after loading the trained model, then
+evaluate ([`eval.sh`](https://github.com/ChengUCB/extended_les_fit/blob/main/MLIPs/CACE-LES/water/eval.sh),
+[`test.py`](https://github.com/ChengUCB/extended_les_fit/blob/main/MLIPs/CACE-LES/water/test.py)):
+
+```python
+cace_nnp = torch.load('best_model.pth', map_location='cuda')
+
+for module in cace_nnp.output_modules:
+    if isinstance(module, LesWrapper):
+        module.set_compute_bec(True)      # adds 'LES_BEC' to the model outputs
+
+evaluator = cace.tasks.EvaluateTask(model_path=cace_nnp, device='cuda',
+                                    energy_key='CACE_energy',
+                                    forces_key='CACE_forces',
+                                    other_keys=['LES_BEC'])
+result = evaluator(data=dataset, batch_size=1, xyz_output='test.xyz')
+```
+
+`set_compute_bec` also registers the key in `model_outputs`, which is what makes it appear in
+the written xyz. `epsilon_factor` sets the high-frequency permittivity used to recover
+physically meaningful values -- see
+[Recovering physical BECs](library.md#recovering-physical-becs).

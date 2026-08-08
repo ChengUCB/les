@@ -52,6 +52,24 @@ The key names are not identical across host MLIPs -- MACE uses `use_quad` where 
 example rather than copying a config across packages.
 ```
 
+## Born effective charges
+
+BECs are not computed during training. Turn them on when you evaluate, with `--compute_bec`
+([`bec_eval.sh`](https://github.com/ChengUCB/extended_les_fit/blob/main/MLIPs/MACE-LES/water/bec_eval.sh)):
+
+```bash
+python mace/scripts/eval_configs.py \
+    --configs h2o_bec.xyz \
+    --output test-bec.xyz \
+    --model H2O_stagetwo.model \
+    --compute_bec \
+    --batch_size 2 --default_dtype float32
+```
+
+The BECs are written into the output xyz. `epsilon_factor` sets the high-frequency
+permittivity used to recover physically meaningful values -- see
+[Recovering physical BECs](library.md#recovering-physical-becs).
+
 ## Molecular dynamics
 
 Two ASE-based examples, both loading the trained model with `compute_bec=True` so the Born

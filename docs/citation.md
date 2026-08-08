@@ -1,6 +1,6 @@
 # Citation
 
-If you use LES in academic work, please cite:
+If you use LES library in academic work, please cite:
 
 ```bibtex
 @article{Kim2025Universalb,
@@ -18,23 +18,6 @@ If you use LES in academic work, please cite:
 The method itself, and the developments this package builds on:
 
 ```bibtex
-@article{Kim2026Perspective,
-  title = {Long-range electrostatics for machine learning interatomic potentials is easier than we thought},
-  author = {Kim, Dongjin and Cheng, Bingqing},
-  journal = {The Journal of Chemical Physics},
-  volume = {164},
-  number = {6},
-  pages = {060901},
-  year = {2026},
-  doi = {10.1063/5.0316886}
-}
-
-@article{Kim2026Multipoles,
-  title = {Polarizable atomic multipoles for learning long-range electrostatics},
-  author = {Kim, Dongjin and King, Daniel S. and Park, Yoonjae and Savoj, Roya and Hamel, Sebastien and Wang, Xiaoyu and Cheng, Bingqing},
-  journal = {arXiv preprint arXiv:2605.05746},
-  year = {2026}
-}
 
 @article{cheng2025latent,
   title = {Latent Ewald summation for machine learning of long-range interactions},
@@ -64,6 +47,24 @@ The method itself, and the developments this package builds on:
   journal = {arXiv preprint arXiv:2504.05169},
   year = {2025}
 }
+
+@article{Kim2026Perspective,
+  title = {Long-range electrostatics for machine learning interatomic potentials is easier than we thought},
+  author = {Kim, Dongjin and Cheng, Bingqing},
+  journal = {The Journal of Chemical Physics},
+  volume = {164},
+  number = {6},
+  pages = {060901},
+  year = {2026},
+  doi = {10.1063/5.0316886}
+}
+
+@article{Kim2026Multipoles,
+  title = {Polarizable atomic multipoles for learning long-range electrostatics},
+  author = {Kim, Dongjin and King, Daniel S. and Park, Yoonjae and Savoj, Roya and Hamel, Sebastien and Wang, Xiaoyu and Cheng, Bingqing},
+  journal = {arXiv preprint arXiv:2605.05746},
+  year = {2026}
+}
 ```
 
 * [Latent Ewald summation for machine learning of long-range interactions](https://www.nature.com/articles/s41524-025-01577-7) -- the method
@@ -87,4 +88,4 @@ CC BY-NC 4.0.
 
 ## Contact
 
-For any queries regarding LES, please contact Bingqing Cheng at tonicbq@gmail.com.
+For any queries regarding LES, please leave issues at github.

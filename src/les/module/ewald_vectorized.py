@@ -104,7 +104,6 @@ class Ewald_vectorized(nn.Module):
             out = self.compute_potential_triclinic(r, q, cell, batch, u=u, quad=quad,
                                                    kappa=kappa, alpha=alpha, e_ext=e_ext,
                                                    compute_field=compute_field)
-        # same (pot, q_induced, u_induced) interface as the legacy module
         return out['pot'], out['q_induced'], out['u_induced']
     
 
@@ -124,8 +123,6 @@ class Ewald_vectorized(nn.Module):
         if alpha.dim() == 2:  # isotropic
             return e_field * alpha.unsqueeze(2)  # [N, n_q, 3]
         elif alpha.dim() == 4 and alpha.shape[2:4] == (3, 3):  # anisotropic
-            # sum_c e_field[i,q,c] alpha[i,q,c,d]; broadcast rather than einsum,
-            # which breaks AOTInductor export
             return (e_field.unsqueeze(-1) * alpha).sum(dim=2)  # [N, n_q, 3]
         else:
             raise ValueError('alpha dimension error')
@@ -155,15 +152,11 @@ class Ewald_vectorized(nn.Module):
                                     e_ext: Optional[torch.Tensor] = None,
                                     compute_field: bool = False):
         """
-        Realspace (non-periodic) Ewald over an [N, N] pair grid (N = total
+        Compute the realspace (non-periodic) Ewald potential over an [N, N] pair grid (N = total
         atoms).
-
         Masks cross-batch pairs, cost is O(N^2). Handles latent monopoles and,
         when given, latent dipoles (u) and quadrupoles (quad), reproducing the
         corresponding terms of the loop-based reference module.
-
-        The quadrupole kernels are contracted analytically to per-pair scalars
-        instead of building the [N, N, 3, 3, 3(, 3)] tensors of the reference.
         """
         device = r.device
         dtype = r.dtype
@@ -180,13 +173,6 @@ class Ewald_vectorized(nn.Module):
         # r_ij = r_j - r_i, the convention the reference kernels are written in
         # (the sign matters for the odd-in-r_ij charge-dipole term).
         r_ij = r.unsqueeze(0) - r.unsqueeze(1)                           # [N, N, 3]
-        # Excluded pairs (i == j, and pairs from different configurations) are
-        # masked out by `keep` below, but they must not blow up on the way there:
-        # i == j has zero separation, and a clamped 1e-12 gives rinv**5 ~ 1e30,
-        # which overflows float32 once the quadrupole kernels multiply it out. The
-        # mask then turns inf into NaN, and the NaN reaches the gradients -- which
-        # is what made compiled non-periodic training diverge while eager did not.
-        # Hand those entries a harmless unit separation instead.
         dist_sq = torch.where(keep_pair,
                               r_ij.pow(2).sum(dim=-1).clamp(min=1e-12),
                               torch.ones_like(r_ij[..., 0]))            # [N, N]
@@ -195,7 +181,7 @@ class Ewald_vectorized(nn.Module):
         a = 1.0 / (self.sigma * (2.0 ** 0.5))
         erf_val = torch.special.erf(dist * a)                            # [N, N]
 
-        # monopole-monopole: 1/2 Σ_{i≠j} q_i q_j erf(a r)/r
+        # monopole-monopole: 1/2 \Sum_{i!=j} q_i q_j erf(a r)/r
         qq_pair = (q.unsqueeze(1) * q.unsqueeze(0)).sum(dim=-1)           # [N, N]
         pot_per_pair = 0.5 * qq_pair * erf_val * rinv                    # [N, N]
 
@@ -209,15 +195,13 @@ class Ewald_vectorized(nn.Module):
                 sigma=self.sigma,
             )
 
-        # where, not a 0/1 multiply: an excluded pair can carry an inf and
-        # inf * 0 is NaN (ChengUCB/les#11), in the backward as much as the forward
         pot_per_pair = torch.where(keep_pair, pot_per_pair,
                                    torch.zeros((), device=device, dtype=dtype))
 
         pair_batch = batch.unsqueeze(1).expand(N, N)                     # [N, N]
         pot_per_batch = torch.zeros(B, device=device, dtype=dtype)
         pot_per_batch.scatter_add_(0, pair_batch.reshape(-1), pot_per_pair.reshape(-1))
-        pot_per_batch = pot_per_batch / self.twopi                       # 1/(4πε0) prefactor
+        pot_per_batch = pot_per_batch / self.twopi                       # 1/(4\pi\epsilon0) prefactor
 
         if not self.remove_self_interaction:
             q_sq_per_atom = (q ** 2).sum(dim=1)        # [N]
@@ -253,20 +237,16 @@ class Ewald_vectorized(nn.Module):
                 sigma=self.sigma, norm_const=norm_const,
                 keep_pair=keep_pair,
             )
-            # the real-space sum already excludes i == j, so the self terms are
-            # added back here when they are meant to be kept
             if not self.remove_self_interaction:
                 e_phi = e_phi + q * (2.0 / (self.sigma * self.twopi ** 1.5)) * self.norm_factor
                 if u is not None:
                     c_self = (4.0 / (3.0 * torch.pi ** 0.5)) * (a ** 3) * norm_const
                     e_field = e_field - c_self * u.to(dtype=dtype)
 
-            # one-hot segment sum: a reduction feeding scatter_add_ is miscompiled
             onehot = (batch.unsqueeze(0)
                       == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
             if kappa is not None:
                 q_induced = self._get_induced_q(e_phi, kappa)
-                # pot_per_batch is in units of physical energy / norm_factor
                 pot_per_batch = pot_per_batch + 0.5 * (
                     onehot @ (e_phi * q_induced)).sum(dim=1) / self.norm_factor
             if alpha is not None:
@@ -290,9 +270,6 @@ class Ewald_vectorized(nn.Module):
                                     compute_field: bool = False):
 
         device = r.device
-        # single source of truth for the compute dtype: callers may hand over a
-        # float64 cell (LAMMPS/ASE do) with float32 positions, and mixing the two
-        # makes the structure-factor accumulation below fail on dtype.
         dtype = r.dtype
 
         N, n_q = q.shape
@@ -302,9 +279,9 @@ class Ewald_vectorized(nn.Module):
         nvec = self.nvec_all.to(device=device, dtype=dtype)  # [K, 3]
         K = nvec.shape[0] # K = (2*N_max+1)^3
 
-        # --- 1. Reciprocal lattice G_b = 2π (M_b^{-1})^T ---
+        # --- 1. Reciprocal lattice G_b = 2\pi (M_b^{-1})^T ---
         cell_inv = torch.linalg.inv(cell) # [B, 3, 3]
-        G = 2 * torch.pi * cell_inv.transpose(-2, -1)  # [B, 3, 3], G = 2π(M^{-1}).T
+        G = 2 * torch.pi * cell_inv.transpose(-2, -1)  # [B, 3, 3], G = 2\pi(M^{-1}).T
 
         volume = torch.det(cell)  # [B]
         if alpha is not None and self.use_epsilon_r_scaling:
@@ -333,11 +310,6 @@ class Ewald_vectorized(nn.Module):
         weight = weight * valid_mask.to(dtype=weight.dtype) # [B, K]
 
         # --- 5. Structure factor S(k) = Σ_i q_i e^{i k·r_i} ---
-        # Broadcast per-configuration quantities onto the atoms with a one-hot matmul
-        # instead of indexing with `batch`. The backward of such a gather is an
-        # atomic_add scatter, and the inductor CPU backend cannot vectorise it once the
-        # atom count is dynamic ("assert index.is_vec") -- which is how LAMMPS calls an
-        # AOTInductor-exported model.
         onehot = (batch.unsqueeze(0)
                   == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
         onehot_t = onehot.transpose(0, 1)                                    # [N, B]
@@ -347,7 +319,6 @@ class Ewald_vectorized(nn.Module):
         #for torchscript compatibility, to avoid dtype mismatch, only use real part
         cos_k_dot_r = torch.cos(k_dot_r) # [N, K]
         sin_k_dot_r = torch.sin(k_dot_r) # [N, K]
-        # expand dimensions for broadcasting
         cos_exp = cos_k_dot_r.unsqueeze(1)  # [N, 1, K]
         sin_exp = sin_k_dot_r.unsqueeze(1)  # [N, 1, K]
         q_exp = q.unsqueeze(2)               # [N, n_q, 1]
@@ -371,11 +342,6 @@ class Ewald_vectorized(nn.Module):
             S_k_imag_per_atom = S_k_imag_per_atom - 0.5 * qk2 * sin_exp
 
         # sum over atoms to get S_k
-        # Sum the per-atom structure factors into their configuration with a one-hot
-        # matmul rather than scatter_add_ over an [N, n_q, K] index. The scatter is
-        # what the physics asks for, but the inductor CPU backend cannot vectorise
-        # the atomic_add it emits ("assert index.is_vec") once the atom count is
-        # dynamic, which is exactly how LAMMPS calls an AOTInductor-exported model.
         S_real = torch.matmul(onehot,
                               S_k_real_per_atom.reshape(N, n_q * K)).reshape(B, n_q, K)
         S_imag = torch.matmul(onehot,
@@ -415,16 +381,9 @@ class Ewald_vectorized(nn.Module):
         e_field = torch.zeros(N, n_q, 3, device=device, dtype=dtype)
 
         if kappa is not None or alpha is not None or compute_field:
-            # prefactor = factors * 2 kfac / V, broadcast onto the atoms (`onehot` and
-            # `onehot_t` come from the structure-factor sum above; a matmul with them
-            # also serves as the segment sum for the induced energies, where a
-            # reduction feeding scatter_add_ is miscompiled by inductor)
             prefactor = torch.matmul(
                 onehot_t, weight * 2.0 / volume.view(B, 1))               # [N, K]
-            # broadcast each configuration's structure factor back to its atoms with
-            # the transposed one-hot rather than S_real[batch]: the backward of that
-            # gather is the same atomic_add scatter the inductor CPU backend cannot
-            # vectorise under dynamic shapes
+
             S_real_at = torch.matmul(
                 onehot_t, S_real.reshape(B, n_q * K)).reshape(N, n_q, K)
             S_imag_at = torch.matmul(
@@ -433,8 +392,6 @@ class Ewald_vectorized(nn.Module):
             if kappa is not None or compute_field:
                 # Re[e^{-ikr} S(k)] = cos(kr) S_real + sin(kr) S_imag
                 term_real = S_real_at * cos_exp + S_imag_at * sin_exp         # [N, n_q, K]
-                # bmm rather than (prefactor * term).sum(-1): the fused reduction over
-                # the k-grid is miscompiled on the Metal backend
                 e_phi = torch.bmm(term_real, prefactor.unsqueeze(-1)).squeeze(-1) * self.norm_factor
                 if self.remove_self_interaction:
                     e_phi = e_phi - q * (2.0 / (self.sigma * self.twopi ** 1.5)) * self.norm_factor
@@ -442,15 +399,12 @@ class Ewald_vectorized(nn.Module):
                 if kappa is not None:
                     q_induced = self._get_induced_q(e_phi, kappa)
                     induced_per_batch = onehot @ (e_phi * q_induced)           # [B, n_q]
-                    # pot is scaled by norm_factor at the end, e_phi already carries it
                     pot_per_batch_per_q = pot_per_batch_per_q + 0.5 * induced_per_batch / self.norm_factor
 
             if alpha is not None or compute_field:
                 # Im[e^{-ikr} S(k)] contributes to the field
                 term_imag = S_real_at * sin_exp - S_imag_at * cos_exp         # [N, n_q, K]
                 wf = prefactor.unsqueeze(1) * term_imag                       # [N, n_q, K]
-                # bmm rather than a broadcast product: keeps the memory at the output
-                # size and stays friendly to AOTInductor export
                 e_field = torch.bmm(wf, kvec_for_atoms) * self.norm_factor    # [N, n_q, 3]
                 if self.remove_self_interaction and u is not None:
                     a = 1.0 / (self.sigma * (2.0 ** 0.5))

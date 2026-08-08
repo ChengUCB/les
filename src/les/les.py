@@ -52,7 +52,7 @@ class Les(nn.Module):
                 sigma=self.sigma, # default 1.0
                 dl=self.dl, # default 2.0
                 is_periodic=self.is_periodic, # True: periodic, False: non-periodic
-                N_max=self.N_max, # default 10, recommend N_max * dl > cell norm for accuracy."
+                N_max=self.N_max, # default 10, recommend N_max * dl > cell norm for accuracy
                 remove_self_interaction=self.remove_self_interaction,
                 use_epsilon_r_scaling=self.use_epsilon_r_scaling,
                 )
@@ -82,9 +82,8 @@ class Les(nn.Module):
         self.dl = les_arguments.get('dl', 2.0)
         self.remove_self_interaction = les_arguments.get('remove_self_interaction', True)
 
-        # set is_periodic (True/False) to use the vectorized, torch.compile
-        # compatible Ewald; leave it out for the legacy module
-        self.is_periodic = les_arguments.get('is_periodic', None)
+
+        self.is_periodic = les_arguments.get('is_periodic', None) # set is_periodic (True/False) to use the vectorized, torch.compile
         self.N_max = les_arguments.get('N_max', 10)
 
         self.remove_mean = les_arguments.get('remove_mean', True)
@@ -96,11 +95,7 @@ class Les(nn.Module):
         self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
     def __setstate__(self, state: Dict[str, Any]):
-        # Backward compatibility: models serialized before these feature flags
-        # existed lack the corresponding attributes. forward() and __constants__
-        # now access them directly (no hasattr), so we restore their historical
-        # defaults at deserialization time. This keeps forward() TorchScript-
-        # friendly while still loading (and scripting) older checkpoints.
+        # Backward compatibility
         for key, default in {
             'use_atomwise': False,
             'use_fixed_atomic_charges': False,
@@ -129,19 +124,6 @@ class Les(nn.Module):
                compute_bec: bool = False,
                bec_output_index: Optional[int] = None, # option to compute BEC components along only one direction
                ) -> Dict[str, Optional[torch.Tensor]]:
-        """
-        arguments:
-        desc: torch.Tensor
-        Descriptors for the atoms. Shape: (n_atoms, n_features)
-        latent_charges: torch.Tensor
-        One can also directly input the latent charges. Shape: (n_atoms, )
-        positions: torch.Tensor
-            positions of the atoms. Shape: (n_atoms, 3)
-        cell: torch.Tensor
-            cell of the system. Shape: (batch_size, 3, 3)
-        batch: torch.Tensor
-            batch of the system. Shape: (n_atoms,)
-        """
         # check the input shapes
         if batch is None:
             batch = torch.zeros(positions.shape[0], dtype=torch.int64, device=positions.device)

@@ -49,11 +49,7 @@ def multipole_pair_energy(q: torch.Tensor,
 
     rinv2 = rinv * rinv
     rinv3 = rinv2 * rinv
-    # the Gaussian argument depends on the positions, so use the export-safe exp
-    # TorchScript cannot compile a custom autograd.Function, so it gets the plain
-    # exp; is_scripting() folds to a constant at compile time and the other branch is
-    # pruned. Eager and AOTInductor keep _ExpSaveInput, whose backward recomputes exp
-    # from the saved input rather than reusing the output (which breaks AOTI export).
+
     if torch.jit.is_scripting():
         gauss = torch.exp(-(a * a) * dist_sq)
     else:
@@ -63,11 +59,6 @@ def multipole_pair_energy(q: torch.Tensor,
           - (6.0 * a / sqrt_pi) * gauss * rinv2
           - (4.0 * a ** 3 / sqrt_pi) * gauss)
 
-    # the multipoles enter by broadcasting over the pair grid rather than by
-    # gathering with an [N, N] index: the backward of such a gather is a
-    # scatter-add, which the inductor CPU backend fails to vectorize (an
-    # AssertionError in its atomic_add codegen), and broadcasting backs up to a
-    # plain reduction instead
     q_j = q.unsqueeze(0)                                             # [1, N, n_q]
     r_ij_e = r_ij.unsqueeze(2)                                       # [N, N, 1, 3]
     rhat = r_ij * rinv.unsqueeze(-1)                                 # [N, N, 3]
@@ -110,8 +101,6 @@ def multipole_pair_energy(q: torch.Tensor,
         # The j-side reductions follow from rhat_ji = -rhat_ij.
         Qsym = quad + quad.transpose(-1, -2)                         # [N, n_q, 3, 3]
         QTr = quad.diagonal(dim1=-2, dim2=-1).sum(dim=-1)            # [N, n_q]
-        # broadcast-multiply-and-sum, not matmul: a broadcast matmul on the
-        # position-dependent path breaks AOTInductor export
         Qr_i = (Qsym.unsqueeze(1) * rhat.unsqueeze(2).unsqueeze(2)).sum(dim=-1)  # [N, N, n_q, 3]
         Qr_j = -Qr_i.transpose(0, 1)
         QRR_i = 0.5 * (Qr_i * rhat_e).sum(dim=-1)                    # [N, N, n_q]
@@ -159,21 +148,9 @@ def multipole_potential_field(q: torch.Tensor,
                              ):
     """
     Electrostatic potential and field at every atom, from the real-space kernels.
-
     These feed the induced charge (-kappa * phi) and induced dipole (alpha * E)
     terms, so unlike the pair energy they must come out in physical units --
     norm_const is applied here.
-
-    Sums over the source index i are written as matmul/bmm rather than a masked
-    reduction: fused reductions over a large axis are miscompiled by the Metal
-    inductor backend, and einsum breaks AOTInductor export.
-
-    Excluded pairs are removed with `torch.where`, never by multiplying with a 0/1
-    mask: a masked-out entry can still carry an inf (its separation is zero), and
-    inf * 0 is NaN, which no later masking can clean up again -- see
-    ChengUCB/les#11. `where` also blocks the backward, so a non-finite gradient in
-    the excluded branch cannot reach the parameters either.
-
     Returns (phi [N, n_q], field [N, n_q, 3]).
     """
     zero = torch.zeros((), device=q.device, dtype=q.dtype)
