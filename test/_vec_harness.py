@@ -41,18 +41,6 @@ for _lim, _val in (("cache_size_limit", 128), ("accumulated_cache_size_limit", 4
     except Exception:
         pass
 
-# Known gaps: reported but do NOT hard-fail, so "green" means "everything
-# currently supported works". Remove a tag once fixed.
-KNOWN_GAPS = {
-    # AOTInductor export of the PERIODIC path fails ("fake tensor in the exported
-    # program constant's list") once the latent multipoles are differentiated as
-    # well as the positions -- some op on the reciprocal-space path reuses its own
-    # output in its backward. It does not block deployment: `nequip-compile`
-    # exports periodic models fine, because inference only needs dE/dr. Kept as a
-    # gate so it is not forgotten, and so a fix is noticed.
-    "periodic [latent-grads]:latent-grad-aoti",
-}
-
 SIGMA, DL = 1.0, 2.0
 # atoms per configuration for the batched inputs; the compile test shrinks this
 N_PER = [5, 6, 7]

@@ -70,6 +70,20 @@ batch_all = torch.cat(batch_list, dim=0)  # [n_atoms]
 # print("batch_all      :", batch_all)
 
 
+############################## checking ##############################
+FAILURES = []
+
+
+def check(name, got, ref, rtol=1e-4, atol=1e-5):
+    print(f"{name}\n  reference : {ref}\n  obtained  : {got}")
+    try:
+        torch.testing.assert_close(got, ref, rtol=rtol, atol=atol)
+        print("  -> match")
+    except AssertionError as e:
+        print(f"  -> MISMATCH: {str(e).splitlines()[0]}")
+        FAILURES.append(name)
+
+
 ############################## Ewald test ##############################
 print("############################## Ewald test ##############################")
 from les.module import Ewald, Ewald_vectorized
@@ -86,10 +100,8 @@ for i in unique_batches:
     pot = org_ewald.compute_potential_realspace(r_raw_now, q_now)['pot']
     results.append(pot)
 org_result = torch.stack(results, dim=0).sum(dim=1)
-print("Original function real space result:", org_result)
-
 vec_result = vec_ewald.compute_potential_realspace(r_all, q_all, cells, batch_all)['pot']
-print("Vectorized function real space result:", vec_result)
+check("real space: vectorized vs legacy", vec_result, org_result)
 
 ### periodic case (reciprocal space) ###
 unique_batches = torch.unique(batch_all)
@@ -102,10 +114,8 @@ for i in unique_batches:
     results.append(pot)
 
 org_result = torch.stack(results, dim=0).sum(dim=1)
-print("Original function reciprocal space result:", org_result)
-
 vec_result = vec_ewald.compute_potential_triclinic(r_all, q_all, cells, batch_all)['pot']
-print("Vectorized function reciprocal space result:", vec_result)
+check("reciprocal space: vectorized vs legacy", vec_result, org_result)
 
 
 ############################## Ewald compilation test ##############################
@@ -114,14 +124,18 @@ print("############################## Ewald compilation test ###################
 updated_les_non_periodic = Les({'is_periodic': False})
 updated_les_periodic = Les({'is_periodic': True})
 
-les_result = updated_les_non_periodic(positions=r_all, latent_charges=q_all, cell=cells, batch=batch_all)
-print("LES for real space result:", les_result['E_lr'])
-compiled_les = torch.compile(updated_les_non_periodic, dynamic=True, fullgraph=True)
-compiled_les_result = compiled_les(positions=r_all, latent_charges=q_all, cell=cells, batch=batch_all)
-print("Compiled LES for real space result:", compiled_les_result['E_lr'])
+for les_module, name in ((updated_les_non_periodic, "real space"),
+                         (updated_les_periodic, "reciprocal space")):
+    kw = dict(positions=r_all, latent_charges=q_all, cell=cells, batch=batch_all)
+    eager = les_module(**kw)['E_lr']
+    compiled = torch.compile(les_module, dynamic=True, fullgraph=True)(**kw)['E_lr']
+    check(f"{name}: compiled LES vs eager LES", compiled, eager)
 
-les_result = updated_les_periodic(positions=r_all, latent_charges=q_all, cell=cells, batch=batch_all)
-print("LES for reciprocal space result:", les_result['E_lr'])
-compiled_les = torch.compile(updated_les_periodic, dynamic=True, fullgraph=True)
-compiled_les_result = compiled_les(positions=r_all, latent_charges=q_all, cell=cells, batch=batch_all)
-print("Compiled LES for reciprocal space result:", compiled_les_result['E_lr'])
+
+############################## summary ##############################
+print("\n############################## SUMMARY ##############################")
+if FAILURES:
+    for name in FAILURES:
+        print("  FAILED:", name)
+    raise SystemExit(f"{len(FAILURES)} comparison(s) failed")
+print("all comparisons matched")

@@ -71,7 +71,11 @@ charges: it includes the induced contribution, while the tensor you passed in do
 ## Flags
 
 * `compute_energy` (default `True`) -- the Ewald sum. Turn it off to get charges only.
-* `compute_field` -- also return the electrostatic potential and field per atom.
+* `compute_field` -- compute the per-atom electrostatic potential and field. They drive the
+  induced charges and dipoles, and are **not** in the output dictionary above: `Ewald` keeps
+  `phi` and `field` internally and returns only the energy and the induced multipoles.
+  Exposing them is a one-line change to `Ewald.forward`, so
+  [open an issue](https://github.com/ChengUCB/les/issues) if you need them.
 * `compute_bec` -- Born effective charges. `bec_output_index` restricts them to one
   Cartesian direction, which is three times cheaper when that is all you need.
 
@@ -85,13 +89,37 @@ These belong to the library and are shared by every host MLIP:
 | `is_periodic` | `None` | `True` = periodic, `False` = non-periodic, `None` = the legacy implementation, which decides per structure. Only the vectorized implementation (`True`/`False`) can be compiled or exported. |
 | `sigma` | `1.0` | Width (Å) of the Gaussian each latent charge is smeared over, and the Ewald splitting parameter. |
 | `dl` | `2.0` | Resolution of the reciprocal-space sum (Å): the cutoff is `k_max = 2*pi/dl`. The default corresponds to `k_c = pi`. |
-| `N_max` | `10` | Extent of the integer k-grid per direction. Keep `N_max * dl` above the cell's longest side. Periodic only. |
+| `N_max` | `10` | Extent of the integer k-grid per direction. Keep `N_max * dl` above the cell's longest side; see [below](#choosing-n-max). Periodic only. |
 | `remove_self_interaction` | `True` | Subtract each charge's interaction with its own Gaussian. `True` is the most robust choice. `False` can sometimes yield slightly better training accuracy, but is less robust when training on finite systems and then extrapolating to periodic ones. |
 
 ```{note}
 We have checked that the default `sigma` and `dl` converge in essentially every case we have
 tried, and they are what the published fits use. Changing them is not recommended.
 ```
+
+```{warning}
+`is_periodic=True` or `False` fixes one boundary condition for the whole `Les` instance, so a
+batch may not mix periodic and non-periodic structures. Only the legacy path (`is_periodic=None`)
+decides per structure, and it cannot be compiled or exported. If you need mixed batches, either
+use the legacy path or run the two kinds through separate instances.
+```
+
+### Choosing `N_max`
+
+`dl` sets the physical cutoff, `|k| <= 2*pi/dl`; `N_max` only has to make the integer grid big
+enough to reach it. Since `n_i = k . a_i / (2*pi)`, the requirement is
+
+```
+N_max >= max_i |a_i| / dl
+```
+
+Only the cell vector lengths enter, so this holds for any cell shape, triclinic included.
+Nothing checks it at run time, and a grid that is too small truncates the reciprocal sum
+silently, so check it yourself whenever the cell grows -- replicating a cell is the usual way
+to fall below it.
+
+`N_max` is not learned, so it can be raised on an existing model without retraining. The cost is
+`(2*N_max+1)^3` k-vectors.
 
 For what the choice of implementation means for `torch.compile` and deployment, see
 [Ewald implementations](https://nequip-les.readthedocs.io/en/latest/guide/ewald.html) in the NequIP-LES documentation.

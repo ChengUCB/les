@@ -6,12 +6,17 @@ Run the whole LES test suite with one command.
     python test/run_all.py -k dipole    # only tests whose name matches 'dipole'
     python test/run_all.py -v           # also show each test's output
 
-The suite is a mix of styles, so this runner handles them uniformly:
-  * pytest directories (assert-based unit tests)
-  * plain scripts that print results (treated as pass unless they raise)
-  * scripts that need a CLI seed argument
+The suite is a mix of styles, so this runner handles them uniformly, and says
+which kind each target is:
 
-Exit code is 0 only if every selected test passed, so it works in CI too.
+  PASS  the target checks its own numbers -- pytest assertions, or a script that
+        compares against a reference and exits nonzero when it disagrees
+  RAN   the script ran to completion without raising, but asserts nothing. That
+        is a smoke test: it catches import errors, shape errors and exceptions,
+        not wrong numbers. Never read it as "verified".
+
+Exit code is 0 only if every selected target reached PASS or RAN, so it works in
+CI too; a RAN target can only fail by raising.
 Set PYTHONPATH to the repo's src/ (this runner does it automatically) to make
 sure the checked-out LES is tested rather than an installed copy.
 """
@@ -30,22 +35,21 @@ PYTEST_TARGETS = [
     "src/les/tests",
 ]
 
-# script targets: (path, extra argv). A script fails only if it raises / exits nonzero.
+# script targets: (path, extra argv, checks_itself)
 SCRIPT_TARGETS = [
-    ("test/test_ewald_vectorized_physics.py", []),                # vectorized physics vs legacy/main
-    ("test/test_ewald_vectorized_compile.py", []),                # torch.compile + AOTInductor gates
-    ("test/test_ewald_vectorization_compilation.py", []),         # legacy vs vectorized
-    ("test/test_torch.py", []),
-    ("test/test_torch_dipole.py", []),
-    ("test/test_torch_all_features.py", []),                       # TorchScript, all terms
-    ("test/test_les_class.py", []),
-    ("test/test_bec.py", []),
-    ("test/test_grad.py", []),
-    ("test/test_quick.py", []),
-    ("test/test_ewald_triclinic.py", []),
-    ("test/test_ewald_real.py", ["42"]),                          # needs a seed
-    ("test/test_ewald_real_dipoles.py", ["42"]),                  # needs a seed
-    ("test/test_ewald_realspace/print_q_u_Q_induced.py", []),
+    ("test/test_ewald_vectorized_physics.py", [], True),           # vectorized physics vs legacy/main
+    ("test/test_ewald_vectorized_compile.py", [], True),           # torch.compile + AOTInductor gates
+    ("test/test_ewald_vectorization_compilation.py", [], True),    # legacy vs vectorized
+    ("test/test_torch_all_features.py", [], True),                 # TorchScript, all terms
+    ("test/test_torch_dipole.py", [], False),
+    ("test/test_les_class.py", [], False),
+    ("test/test_bec.py", [], False),
+    ("test/test_grad.py", [], False),
+    ("test/test_quick.py", [], False),
+    ("test/test_ewald_triclinic.py", [], False),
+    ("test/test_ewald_real.py", ["42"], False),                   # needs a seed
+    ("test/test_ewald_real_dipoles.py", ["42"], False),           # needs a seed
+    ("test/test_ewald_realspace/print_q_u_Q_induced.py", [], False),
 ]
 
 
@@ -80,37 +84,41 @@ def main():
         rc, out, dt = run([sys.executable, "-m", "pytest", target, "-q"], REPO)
         # pull pytest's own summary line, e.g. "38 passed"
         tail = [l for l in out.strip().splitlines() if "passed" in l or "failed" in l or "error" in l]
-        rows.append((target, rc == 0, tail[-1].strip() if tail else "", dt))
+        rows.append((target, "PASS" if rc == 0 else "FAIL",
+                     tail[-1].strip() if tail else "", dt))
         if rc != 0:
             failed.append((target, out))
         if args.verbose:
             print(out)
 
-    for path, extra in SCRIPT_TARGETS:
+    for path, extra, checks in SCRIPT_TARGETS:
         if not selected(path):
             continue
         if not os.path.exists(os.path.join(REPO, path)):
-            rows.append((path, True, "skipped (missing)", 0.0))
+            rows.append((path, "SKIP", "missing", 0.0))
             continue
         rc, out, dt = run([sys.executable, os.path.basename(path)] + extra,
                           os.path.join(REPO, os.path.dirname(path)))
-        note = ""
-        if rc == 0:
-            # surface the summary line of the gate-style harness when present
-            for line in out.splitlines():
-                if "checks passed" in line or "SUMMARY" in line:
-                    note = "gates passed"
-        rows.append((path, rc == 0, note, dt))
         if rc != 0:
+            status, note = "FAIL", ""
             failed.append((path, out))
+        elif checks:
+            status, note = "PASS", "comparisons asserted"
+        else:
+            status, note = "RAN", "no assertions -- smoke only"
+        rows.append((path, status, note, dt))
         if args.verbose:
             print(out)
 
     width = max(len(r[0]) for r in rows) if rows else 20
-    print("\n" + "=" * (width + 26))
-    for name, ok, note, dt in rows:
-        print(f"{'PASS' if ok else 'FAIL'}  {name:<{width}}  {dt:5.1f}s  {note}")
-    print("=" * (width + 26))
+    print("\n" + "=" * (width + 34))
+    for name, status, note, dt in rows:
+        print(f"{status:<4}  {name:<{width}}  {dt:5.1f}s  {note}")
+    print("=" * (width + 34))
+    n_ran = sum(1 for r in rows if r[1] == "RAN")
+    if n_ran:
+        print(f"note: {n_ran} target(s) reported RAN -- they exercise the code but "
+              f"check no numbers, so they cannot detect a wrong result.")
 
     if failed:
         for name, out in failed:
@@ -118,7 +126,9 @@ def main():
             print("\n".join(out.strip().splitlines()[-25:]))
         print(f"\n{len(failed)}/{len(rows)} test targets FAILED")
         sys.exit(1)
-    print(f"all {len(rows)} test targets passed")
+    n_pass = sum(1 for r in rows if r[1] == "PASS")
+    print(f"{n_pass}/{len(rows)} targets verified their numbers, "
+          f"{n_ran} ran without checking, none failed")
 
 
 if __name__ == "__main__":

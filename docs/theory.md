@@ -33,7 +33,9 @@ forces, and the charges are whatever makes those come out right. This is why the
 *latent* ([King et al. 2025](https://www.nature.com/articles/s41467-025-63852-x)).
 
 They are not arbitrary, either. Because $E^\text{lr}$ depends on them only through a physical
-In practice they come out physically meaningful: models trained on energies
+functional form -- the Ewald sum of a smeared charge distribution -- fitting energies and forces
+constrains them to behave like real charges. In practice they come out
+physically meaningful: models trained on energies
 and forces alone predict molecular dipoles, Born effective charges, IR spectra and ionic
 conductivities they never saw
 ([Zhong et al. 2025](https://doi.org/10.1038/s41524-025-01911-z)).

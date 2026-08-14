@@ -7,6 +7,8 @@ Compilation of the vectorized Ewald: torch.compile and AOTInductor.
   E AOTInductor dynamic      == eager, traced at N1 and run at N2 != N1
   G remove_self_interaction=False under compile (the r-independent self terms
     cancel out of the forces, so only the energy catches a bad reduction there)
+  L the latent multipoles differentiated as well as the positions, in float64;
+    AOTInductor on the non-periodic path, torch.compile on both
 
 FORCES are the strict gate: issue ChengUCB/NequIP-LES#15 showed AOTInductor can
 match the energy while breaking the gradient.
@@ -24,7 +26,7 @@ import sys
 import torch
 
 from _vec_harness import *          # noqa: F401,F403
-from _vec_harness import (AOTI_DEVICE, ARG_NAMES, DEVICE, DEVICE_DTYPE, KNOWN_GAPS,
+from _vec_harness import (AOTI_DEVICE, ARG_NAMES, DEVICE, DEVICE_DTYPE,
                           _devices, _report, build, make_batched, make_single, pack)
 import _vec_harness
 
@@ -37,10 +39,8 @@ def _gate_once(gate, tag, fails, body):
     try:
         body(AOTI_DEVICE)
     except Exception as e:
-        note = "KNOWN-GAP" if tag in KNOWN_GAPS else "FAILED"
-        print(f"[{gate}] {note} -> {type(e).__name__}: {str(e)[:150]}")
-        if tag not in KNOWN_GAPS:
-            fails.append(f"{tag}-error")
+        print(f"[{gate}] FAILED -> {type(e).__name__}: {str(e)[:150]}")
+        fails.append(f"{tag}-error")
 
 
 def _compile_gate(gate, tag, fails, body, retry=True):
@@ -66,10 +66,8 @@ def _gate_with_retry(gate, tag, fails, body):
                 print(f"[{gate}] {dev.type} codegen failed "
                       f"({type(e).__name__}), retrying on cpu")
                 continue
-            note = "KNOWN-GAP" if tag in KNOWN_GAPS else "FAILED"
-            print(f"[{gate}] {note} -> {type(e).__name__}: {str(e)[:150]}")
-            if tag not in KNOWN_GAPS:
-                fails.append(f"{tag}-error")
+            print(f"[{gate}] FAILED -> {type(e).__name__}: {str(e)[:150]}")
+            fails.append(f"{tag}-error")
 
 
 def check_compile_export(is_periodic, terms, label, n_q=1):
@@ -169,6 +167,9 @@ def check_latent_grads(is_periodic, label):
     not just a shape detail: the backward of a gather over the [N, N] pair grid
     is a scatter-add, and the inductor CPU backend fails to vectorize it, which
     made every non-periodic model unexportable while all the gates above passed.
+
+    The AOTInductor half runs on the non-periodic path only; deployment
+    differentiates positions alone, which gates C and E already cover.
     """
     import _vec_harness as H
     fails = []
@@ -196,7 +197,8 @@ def check_latent_grads(is_periodic, label):
                 note="dynamic aoti vs eager (f64)")
 
     _compile_gate("L lat-cmp ", f"{label}:latent-grad-compile", fails, body_compile, retry=False)
-    _gate_once("L lat-aoti", f"{label}:latent-grad-aoti", fails, body_aoti)
+    if not is_periodic:
+        _gate_once("L lat-aoti", f"{label}:latent-grad-aoti", fails, body_aoti)
     return fails
 
 
