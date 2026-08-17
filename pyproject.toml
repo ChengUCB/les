@@ -1,3 +1,32 @@
 [build-system]
 requires = ["setuptools>=64", "wheel"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "les"
+dynamic = ["version"]
+description = "Latent Ewald Summation: long-range interactions for machine learning potentials"
+readme = "README.md"
+license = "CC-BY-NC-4.0"
+authors = [
+    {name = "Bingqing Cheng"},
+]
+dependencies = [
+    "torch>=2.5.0",
+    "numpy",
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+[project.urls]
+Homepage = "https://github.com/ChengUCB/les"
+Documentation = "https://les.readthedocs.io"
+
+[tool.setuptools.dynamic]  # get version from src/les/_version.py
+version = {attr = "les._version.__version__"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
