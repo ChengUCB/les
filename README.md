@@ -3,6 +3,12 @@
 ## Summary
 
 The Latent Ewald Summation (LES) library is a plug-in to add long-range interactions to short-ranged machine learning interatomic potentials.
+
+## Documentation
+
+**[les.readthedocs.io](https://les.readthedocs.io)** — how LES works, using the library
+directly, and per-MLIP guides for MACE, CACE, NequIP and Allegro.
+
 ## Requirements
 
 - Python 3.6 or higher
@@ -44,6 +50,11 @@ One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self
 'remove_self_interaction=False' can sometimes yield a bit better training accuracy, but is less robust when training on finite systems and then extrapolate to periodic systems.
 
 ## 📣 Update 
+
+
+### 6th Aug 2026
+Now the extended **LES (Latent Ewald Summation)** with multipoles is fully torch.compile-friendly.
+Documents are added.
 
 ### 31st Jul 2026
 Now the extended **LES (Latent Ewald Summation)** ([https://github.com/ChengUCB/les](https://github.com/ChengUCB/les)) with multipoles is fully torch.jit.script-friendly.

@@ -5,7 +5,7 @@ import torch
 import les
 from les import Les
 
-les = Les(les_arguments={})
+les = Les(les_arguments={'use_atomwise': True}) # desc is used below
 
 # set the same random seed for reproducibility
 torch.manual_seed(0)
