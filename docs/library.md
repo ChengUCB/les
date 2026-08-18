@@ -89,7 +89,7 @@ These belong to the library and are shared by every host MLIP:
 | `is_periodic` | `None` | `True` = periodic, `False` = non-periodic, `None` = the legacy implementation, which decides per structure. Only the vectorized implementation (`True`/`False`) can be compiled or exported. |
 | `sigma` | `1.0` | Width (Å) of the Gaussian each latent charge is smeared over, and the Ewald splitting parameter. |
 | `dl` | `2.0` | Resolution of the reciprocal-space sum (Å): the cutoff is `k_max = 2*pi/dl`. The default corresponds to `k_c = pi`. |
-| `N_max` | `10` | Extent of the integer k-grid per direction. Keep `N_max * dl` above the cell's longest side; see [below](#choosing-n-max). Periodic only. |
+| `N_max` | `10` | Extent of the integer k-grid per direction. Keep `N_max * dl` above the cell's longest side; see [below](#choosing-n_max). Periodic only. |
 | `remove_self_interaction` | `True` | Subtract each charge's interaction with its own Gaussian. `True` is the most robust choice. `False` can sometimes yield slightly better training accuracy, but is less robust when training on finite systems and then extrapolating to periodic ones. |
 
 ```{note}

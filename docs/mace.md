@@ -6,6 +6,30 @@ the ordinary `run_train.py` with two extra flags.
 Complete example, bulk water with the full multipole and response set:
 [`MLIPs/MACE-LES/water/maceles-uQiqiu-r-4.5-nl-1`](https://github.com/ChengUCB/extended_les_fit/tree/main/MLIPs/MACE-LES/water/maceles-uQiqiu-r-4.5-nl-1).
 
+## Pre-trained model
+
+**MACELES-OFF (S)** is a MACE-LES organic force field, trained on the MACE-OFF dataset with
+latent charges:
+[`MACELES-OFF_small_converted.model`](https://github.com/ChengUCB/les_fit/blob/main/MACELES-OFF/MACELES-OFF_small_converted.model).
+It covers H, C, N, O, F, P, S, Cl, Br and I.
+
+Load it like any other MACE model -- nothing LES-specific is needed:
+
+```bash
+wget https://github.com/ChengUCB/les_fit/raw/main/MACELES-OFF/MACELES-OFF_small_converted.model
+```
+
+```python
+from mace.calculators import MACECalculator
+
+calculator = MACECalculator(model_paths='MACELES-OFF_small_converted.model', device='cuda')
+```
+
+For the model and the benchmarks behind it, see
+[Kim et al., *J. Chem. Theory Comput.* (2025)](https://doi.org/10.1021/acs.jctc.5c01400); the
+training script is in
+[`les_fit/MACELES-OFF`](https://github.com/ChengUCB/les_fit/tree/main/MACELES-OFF).
+
 ## Training
 
 From that directory's `fit.sh`:
