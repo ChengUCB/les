@@ -145,9 +145,12 @@ def make_single(device, dtype, n, periodic, n_q=1, seed=7):
 # ----------------------------------------------------------------------------
 # wrappers returning (E, F): forces must be validated everywhere
 # ----------------------------------------------------------------------------
-def _les(is_periodic):
-    return Les({"is_periodic": is_periodic, "sigma": SIGMA, "dl": DL,
-                "remove_self_interaction": REMOVE_SELF_INTERACTION})
+def _les(is_periodic, extra=None):
+    args = {"is_periodic": is_periodic, "sigma": SIGMA, "dl": DL,
+            "remove_self_interaction": REMOVE_SELF_INTERACTION}
+    if extra is not None:
+        args.update(extra)
+    return Les(args)
 
 
 class WrapQ(torch.nn.Module):
@@ -235,9 +238,39 @@ class WrapLatentGrad(torch.nn.Module):
         return E.detach(), torch.cat([g.reshape(-1) for g in grads])
 
 
+class WrapQeq(torch.nn.Module):
+    """Charge equilibration: the charges are the solution of a linear system, so
+    the deployed graph carries linalg.solve and its backward."""
+    def __init__(self, is_periodic):
+        super().__init__()
+        self.les = _les(is_periodic, {"use_qeq": True})
+
+    def forward(self, positions, latent_chi, atomic_numbers, total_charge, cell, batch):
+        E = self.les(positions=positions, latent_chi=latent_chi,
+                     atomic_numbers=atomic_numbers, total_charge=total_charge,
+                     cell=cell, batch=batch, compute_bec=False)["E_lr"].sum()
+        F = -torch.autograd.grad(E, positions)[0]
+        return E.detach(), F
+
+
+class WrapNqe(torch.nn.Module):
+    """Fukui redistribution: no solve, but a per-structure normalization."""
+    def __init__(self, is_periodic):
+        super().__init__()
+        self.les = _les(is_periodic, {"use_nqe": True})
+
+    def forward(self, positions, latent_charges, latent_fukui, total_charge, cell, batch):
+        E = self.les(positions=positions, latent_charges=latent_charges,
+                     latent_fukui=latent_fukui, total_charge=total_charge,
+                     cell=cell, batch=batch, compute_bec=False)["E_lr"].sum()
+        F = -torch.autograd.grad(E, positions)[0]
+        return E.detach(), F
+
+
 # term sets exercised end to end; extend as further multipoles land
 WRAPPERS = {"q": WrapQ, "q+u": WrapQU, "q+u+Q": WrapQUQuad,
-            "q+u+Q+k+a": WrapFull, "all-grads": WrapLatentGrad}
+            "q+u+Q+k+a": WrapFull, "all-grads": WrapLatentGrad,
+            "qeq": WrapQeq, "nqe": WrapNqe}
 ARG_NAMES = {
     "q": ["positions", "latent_charges", "cell", "batch"],
     "q+u": ["positions", "latent_charges", "latent_dipoles", "cell", "batch"],
@@ -247,7 +280,18 @@ ARG_NAMES = {
                   "latent_kappas", "latent_alphas", "cell", "batch"],
     "all-grads": ["positions", "latent_charges", "latent_dipoles", "latent_quads",
                   "latent_kappas", "latent_alphas", "cell", "batch"],
+    "qeq": ["positions", "latent_chi", "atomic_numbers", "total_charge", "cell", "batch"],
+    "nqe": ["positions", "latent_charges", "latent_fukui", "total_charge", "cell", "batch"],
 }
+
+# dim 0 is the atom count for per-atom inputs only; these are per-structure
+PER_STRUCTURE_ARGS = ("cell", "total_charge")
+
+
+def dynamic_spec(terms, nat):
+    """torch.export dynamic_shapes for a term set: natoms on the per-atom inputs."""
+    return {n: (None if n in PER_STRUCTURE_ARGS else {0: nat})
+            for n in ARG_NAMES[terms]}
 
 
 def build(is_periodic, terms, device):
@@ -258,6 +302,16 @@ def build(is_periodic, terms, device):
 
 def pack(r, q, u, quad, kappa, alpha, cell, batch, terms):
     r = r.detach().requires_grad_(True)
+    if terms in ("qeq", "nqe"):
+        # Qeq and NQE are single-channel, and both need a per-structure total
+        # charge; a nonzero one so the constraint is actually doing something.
+        scalar = q[:, 0].contiguous()
+        z = torch.arange(r.shape[0], device=r.device) % 8 + 1
+        B = cell.shape[0]
+        qtot = (torch.arange(B, device=cell.device, dtype=cell.dtype) - 1.0) * 0.5
+        if terms == "qeq":
+            return (r, scalar, z, qtot, cell, batch)
+        return (r, scalar, scalar * 0.5 + 0.2, qtot, cell, batch)
     if terms == "q":
         return (r, q, cell, batch)
     if terms == "q+u":

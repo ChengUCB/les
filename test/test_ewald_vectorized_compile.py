@@ -26,8 +26,9 @@ import sys
 import torch
 
 from _vec_harness import *          # noqa: F401,F403
-from _vec_harness import (AOTI_DEVICE, ARG_NAMES, DEVICE, DEVICE_DTYPE,
-                          _devices, _report, build, make_batched, make_single, pack)
+from _vec_harness import (AOTI_DEVICE, DEVICE, DEVICE_DTYPE,
+                          _devices, _report, build, dynamic_spec, make_batched,
+                          make_single, pack)
 import _vec_harness
 
 # small systems keep the codegen tractable (see the module docstring)
@@ -121,8 +122,7 @@ def check_dynamic(is_periodic, terms, label):
     def body_aoti(dev):
         vec, a1, a2, ref = _build(dev)
         nat = torch.export.Dim("natoms", min=2, max=1 << 20)
-        dyn = {n: ({0: nat} if n != "cell" else None) for n in ARG_NAMES[terms]}
-        ep = torch.export.export(vec, a1, dynamic_shapes=dyn)
+        ep = torch.export.export(vec, a1, dynamic_shapes=dynamic_spec(terms, nat))
         aoti = torch._inductor.aoti_load_package(
             torch._inductor.aoti_compile_and_package(ep))
         _report("E dyn-aoti", aoti(*a2), ref, 1e-4, 1e-4, label, fails,
@@ -189,8 +189,8 @@ def check_latent_grads(is_periodic, label):
     def body_aoti(_dev):
         vec, args, ref = _build()
         nat = torch.export.Dim("natoms", min=2, max=1 << 20)
-        dyn = {n: ({0: nat} if n != "cell" else None) for n in H.ARG_NAMES["all-grads"]}
-        ep = torch.export.export(vec, args, dynamic_shapes=dyn)
+        ep = torch.export.export(vec, args,
+                                 dynamic_shapes=H.dynamic_spec("all-grads", nat))
         aoti = torch._inductor.aoti_load_package(
             torch._inductor.aoti_compile_and_package(ep))
         _report("L lat-aoti", aoti(*args), ref, 1e-9, 1e-9, label, fails,
@@ -217,6 +217,13 @@ def main():
                 fails += check_compile_export(is_periodic, terms, label, n_q=2)
             fails += check_dynamic(is_periodic, terms, label)
             fails += check_no_self_removal(is_periodic, terms, label)
+        # charge equilibration and Fukui redistribution: single channel, and the
+        # Qeq graph additionally carries linalg.solve and its backward
+        for terms in ("qeq", "nqe"):
+            label = f"{pname} [{terms}]"
+            print(f"\n================ {label} ================")
+            fails += check_compile_export(is_periodic, terms, label)
+            fails += check_dynamic(is_periodic, terms, label)
         # once per periodicity: the full term set with every multipole
         # differentiated, which is the shape of a real model's graph
         fails += check_latent_grads(is_periodic, f"{pname} [latent-grads]")

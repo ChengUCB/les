@@ -41,6 +41,8 @@ SCRIPT_TARGETS = [
     ("test/test_ewald_vectorized_compile.py", [], True),           # torch.compile + AOTInductor gates
     ("test/test_ewald_vectorization_compilation.py", [], True),    # legacy vs vectorized
     ("test/test_torch_all_features.py", [], True),                 # TorchScript, all terms
+    ("test/test_qeq.py", [], True),                                # Qeq/NQE solve + scripting
+    ("test/test_qeq_physics.py", [], True),                        # Qeq/NQE physics vs closed forms
     ("test/test_torch_dipole.py", [], False),
     ("test/test_les_class.py", [], False),
     ("test/test_bec.py", [], False),

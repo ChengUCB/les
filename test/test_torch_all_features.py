@@ -11,6 +11,10 @@ Features exercised simultaneously:
   - atomic alpha (use_atomic_alpha + latent_alphas + atomic_numbers)
   - atomic kappa (latent_kappas)
 
+Neural charge equilibration is covered separately: it refuses latent_kappas, since
+an induced charge added afterwards would break the total charge it just enforced,
+so it cannot ride along with the all-features model.
+
 Also regression-checks backward compatibility: a model whose serialized state is
 missing the newer use_* flags (as in checkpoints saved before they existed) must
 still load, run, and script with identical results (see Les.__setstate__).
@@ -38,13 +42,16 @@ def _build_inputs(seed: int = 0):
     kappa = torch.ones(n) * 0.5               # atomic kappa (hardness)
     alpha = torch.ones(n) * 0.5               # (isotropic) latent alpha
     atomic_numbers = torch.tensor([8, 1, 1, 8, 1, 1, 8, 1, 1, 8], dtype=torch.int64)
+    fukui = torch.rand(n)                     # Fukui weights, raw
+    total_charge = torch.tensor([0.5])        # nonzero, so NQE has work to do
 
     box = torch.tensor([[10.0, 0.0, 0.0],
                         [0.0, 10.0, 0.0],
                         [0.0, 0.0, 10.0]]).unsqueeze(0)
     return dict(positions=r, cell=box, latent_charges=q, latent_dipoles=u,
                 latent_quads=quad, latent_kappas=kappa, latent_alphas=alpha,
-                atomic_numbers=atomic_numbers, batch=None, compute_bec=False)
+                atomic_numbers=atomic_numbers, latent_fukui=fukui,
+                total_charge=total_charge, batch=None, compute_bec=False)
 
 
 def _run(model, inputs):
@@ -54,9 +61,11 @@ def _run(model, inputs):
         latent_charges=inputs['latent_charges'],
         latent_dipoles=inputs['latent_dipoles'],
         latent_quads=inputs['latent_quads'],
-        latent_kappas=inputs['latent_kappas'],
+        latent_kappas=inputs.get('latent_kappas'),
         latent_alphas=inputs['latent_alphas'],
         atomic_numbers=inputs['atomic_numbers'],
+        latent_fukui=inputs['latent_fukui'],
+        total_charge=inputs['total_charge'],
         batch=inputs['batch'],
         compute_bec=inputs['compute_bec'],
     )
@@ -103,6 +112,15 @@ def test_all_features_scriptable_and_consistent():
     _assert_scripted_matches_eager(model, inputs, "all-features")
 
 
+def test_nqe_scriptable_and_consistent():
+    """NQE on the legacy Ewald path, scripted. Kappa is dropped because the two are
+    mutually exclusive -- see the module docstring."""
+    inputs = dict(_build_inputs())
+    inputs['latent_kappas'] = None
+    model = Les(les_arguments={'use_nqe': True, 'use_atomic_alpha': True})
+    _assert_scripted_matches_eager(model, inputs, "nqe")
+
+
 def test_backward_compat_old_checkpoint_scriptable_and_consistent():
     """A checkpoint saved before the use_* flags existed must still load,
     run, and script with identical results after __setstate__ migration."""
@@ -115,14 +133,16 @@ def test_backward_compat_old_checkpoint_scriptable_and_consistent():
     torch.save(model, buf); buf.seek(0)
     obj = torch.load(buf, weights_only=False)
     for flag in ('use_atomwise', 'use_fixed_atomic_charges',
-                 'use_atomic_alpha', 'use_epsilon_r_scaling'):
+                 'use_atomic_alpha', 'use_epsilon_r_scaling',
+                 'use_qeq', 'use_nqe', 'qeq_self_interaction'):
         obj.__dict__.pop(flag, None)
     buf2 = io.BytesIO()
     torch.save(obj, buf2); buf2.seek(0)
     migrated = torch.load(buf2, weights_only=False)
 
     for flag in ('use_atomwise', 'use_fixed_atomic_charges',
-                 'use_atomic_alpha', 'use_epsilon_r_scaling'):
+                 'use_atomic_alpha', 'use_epsilon_r_scaling',
+                 'use_qeq', 'use_nqe', 'qeq_self_interaction'):
         assert hasattr(migrated, flag), f"__setstate__ did not restore {flag}"
 
     # Old checkpoints predate use_atomic_alpha, so it is restored to False;
@@ -134,5 +154,6 @@ def test_backward_compat_old_checkpoint_scriptable_and_consistent():
 
 if __name__ == "__main__":
     test_all_features_scriptable_and_consistent()
+    test_nqe_scriptable_and_consistent()
     test_backward_compat_old_checkpoint_scriptable_and_consistent()
     print("\nAll TorchScript regression checks passed.")

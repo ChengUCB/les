@@ -11,3 +11,7 @@ from les.module.bec import *
 from les.module.fixedcharges import *
 
 from les.module.atomicalpha import *
+
+from les.module.qeq import *
+
+from les.module.nqe import *
