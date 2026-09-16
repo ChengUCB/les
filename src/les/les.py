@@ -12,6 +12,11 @@ from .module import (
     AtomicAlpha,
     Qeq,
     Nqe,
+    Model0,
+    Model0A,
+    ModelB,
+    quadratic_energy,
+    segment_onehot,
 )
 
 __all__ = ['Les']
@@ -19,7 +24,8 @@ __all__ = ['Les']
 class Les(nn.Module):
 
     __constants__ = ['use_fixed_atomic_charges', 'use_atomic_alpha', 'use_atomwise', 'use_epsilon_r_scaling',
-                     'use_qeq', 'use_nqe']
+                     'use_qeq', 'use_nqe', 'use_model0', 'use_model0_a',
+                     'use_model_b']
     def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
         """
         LES model for long-range interations
@@ -91,6 +97,35 @@ class Les(nn.Module):
             self.nqe = Nqe(eps=self.nqe_eps,
                            masked_charge_scope=(self.nqe_charge_scope == 'masked'))
 
+        n_charge_models = sum([bool(self.use_qeq), bool(self.use_nqe),
+                               bool(self.use_model0), bool(self.use_model0_a),
+                               bool(self.use_model_b)])
+        if n_charge_models > 1:
+            raise ValueError("use_qeq, use_nqe, use_model0, use_model0_a and "
+                             "use_model_b each replace the charge source, so at most "
+                             "one may be enabled")
+        if self.use_model0 or self.use_model0_a or self.use_model_b:
+            if self.is_periodic is None:
+                raise ValueError("the frontier models require is_periodic to be True or "
+                                 "False: the legacy path decides the boundary condition "
+                                 "per structure, which a single batch-wide coupling "
+                                 "matrix cannot represent")
+            frontier_args = dict(beta=self.frontier_beta,
+                                 epsilon_e=self.frontier_epsilon_e,
+                                 constrain_charge=self.frontier_constrain_charge,
+                                 carrier_sign=self.frontier_carrier_sign)
+            if self.use_model0:
+                self.model0 = Model0(**frontier_args)
+            elif self.use_model0_a:
+                # Model 0-a always constrains the reference charge, so it takes no
+                # constrain_charge argument
+                self.model0_a = Model0A(
+                    beta=self.frontier_beta, epsilon_e=self.frontier_epsilon_e,
+                    carrier_sign=self.frontier_carrier_sign,
+                    charge_switch_width=self.frontier_charge_switch_width)
+            else:
+                self.model_b = ModelB(**frontier_args)
+
         self.bec = BEC(
              remove_mean=self.remove_mean,
              epsilon_factor=self.epsilon_factor,
@@ -135,6 +170,22 @@ class Les(nn.Module):
         self.qeq_max_atoms_per_structure = les_arguments.get(
             'qeq_max_atoms_per_structure', None)
         self.nqe_charge_scope = les_arguments.get('nqe_charge_scope', 'system')
+
+        self.use_model0 = les_arguments.get('use_model0', False)
+        self.use_model0_a = les_arguments.get('use_model0_a', False)
+        self.use_model_b = les_arguments.get('use_model_b', False)
+        self.frontier_beta = les_arguments.get('frontier_beta', 1.0)
+        # electronic screening relating LES charges to physical ones,
+        # z = q_physical / sqrt(frontier_epsilon_e). Separate from epsilon_factor,
+        # which is the high-frequency permittivity BEC uses.
+        self.frontier_epsilon_e = les_arguments.get('frontier_epsilon_e', 1.0)
+        self.frontier_constrain_charge = les_arguments.get(
+            'frontier_constrain_charge', False)
+        # -1 for an added electron, +1 for an added hole
+        self.frontier_carrier_sign = les_arguments.get('frontier_carrier_sign', -1)
+        # width in e over which Model 0-a blends the addition and removal heads
+        self.frontier_charge_switch_width = les_arguments.get(
+            'frontier_charge_switch_width', 0.01)
         for key, val in (('qeq_charge_scope', self.qeq_charge_scope),
                          ('nqe_charge_scope', self.nqe_charge_scope)):
             if val not in ('system', 'masked'):
@@ -152,6 +203,9 @@ class Les(nn.Module):
             'use_qeq': False,
             'use_nqe': False,
             'qeq_self_interaction': True,
+            'use_model0': False,
+            'use_model0_a': False,
+            'use_model_b': False,
         }.items():
             state.setdefault(key, default)
         super().__setstate__(state)
@@ -177,6 +231,10 @@ class Les(nn.Module):
                total_charge: Optional[torch.Tensor] = None, # [batch_size, ] defaults to neutral
                qeq_mask: Optional[torch.Tensor] = None, # [n_atoms, ] bool, True = equilibrate
                nqe_mask: Optional[torch.Tensor] = None, # [n_atoms, ] bool, True = absorbs the deficit
+               latent_frontier: Optional[torch.Tensor] = None, # [n_atoms, ] epsilon, for use_model0
+               latent_local_addition: Optional[torch.Tensor] = None, # [n_atoms, ] a, for use_model_b
+               reference_total_charge: Optional[torch.Tensor] = None, # [batch_size, ] physical Q_ref
+               carrier_count: Optional[torch.Tensor] = None, # [batch_size, ] m per structure
                ) -> Dict[str, Optional[torch.Tensor]]:
         # check the input shapes
         if batch is None:
@@ -219,6 +277,15 @@ class Les(nn.Module):
         # Charge equilibration replaces the charge source, so it has to run before the
         # Ewald sum: the equilibrated charges are what the long-range energy is built from.
         qeq_energy: Optional[torch.Tensor] = None
+        frontier_energy: Optional[torch.Tensor] = None
+        frontier_occupation: Optional[torch.Tensor] = None
+        frontier_reference_charges: Optional[torch.Tensor] = None
+        frontier_reference_energy: Optional[torch.Tensor] = None
+        frontier_addition_energy: Optional[torch.Tensor] = None
+        frontier_occupation_add: Optional[torch.Tensor] = None
+        frontier_occupation_remove: Optional[torch.Tensor] = None
+        frontier_charge_deficit: Optional[torch.Tensor] = None
+        frontier_removal_gate: Optional[torch.Tensor] = None
         if self.use_qeq and latent_chi is not None:
             if atomic_numbers is None:
                 raise ValueError("atomic_numbers must be provided when use_qeq is True")
@@ -283,9 +350,70 @@ class Les(nn.Module):
                 tot_q = total_charge
             latent_charges = self.nqe(latent_charges.reshape(-1), latent_fukui, batch,
                                       tot_q, nqe_mask)
+        elif self.use_model0 or self.use_model0_a or self.use_model_b:
+            # This first version covers monopoles and one carrier. Rather than quietly
+            # ignoring a term it cannot place, it refuses the combination.
+            if (latent_kappas is not None or latent_alphas is not None
+                    or latent_dipoles is not None or latent_quads is not None
+                    or e_ext is not None or compute_field or compute_bec):
+                raise ValueError("the frontier models handle monopoles only for now: "
+                                 "latent_kappas, latent_alphas, latent_dipoles, "
+                                 "latent_quads, e_ext, compute_field and compute_bec "
+                                 "are not supported with use_model0 / use_model_b")
+            if carrier_count is None:
+                raise ValueError("carrier_count is required by the frontier models: "
+                                 "give 0 or 1 per structure")
+            assert latent_charges.numel() == positions.shape[0], \
+                'the frontier models support a single charge channel only'
+            z_raw = latent_charges.reshape(-1)
+            n_batch = cell.shape[0]
+            if self.use_model0:
+                if latent_frontier is None:
+                    raise ValueError("latent_frontier is required when use_model0 is set")
+                latent_charges, frontier_reference_charges, frontier_occupation = \
+                    self.model0(z_raw, latent_frontier, batch, carrier_count, n_batch,
+                                reference_total_charge)
+            elif self.use_model0_a:
+                if latent_frontier is None:
+                    raise ValueError("latent_frontier is required when use_model0_a is "
+                                     "set: [n_atoms, 2], addition score then removal")
+                if reference_total_charge is None:
+                    raise ValueError("reference_total_charge is required by use_model0_a, "
+                                     "which always constrains the reference charge; "
+                                     "neutrality is not assumed on your behalf")
+                (latent_charges, frontier_reference_charges, frontier_occupation,
+                 frontier_occupation_add, frontier_occupation_remove,
+                 frontier_charge_deficit, frontier_removal_gate) = self.model0_a(
+                    z_raw, latent_frontier, batch, carrier_count, n_batch,
+                    reference_total_charge)
+            else:
+                if latent_local_addition is None:
+                    raise ValueError("latent_local_addition is required when "
+                                     "use_model_b is set")
+                # the matrix whose quadratic form is this module's own monopole energy,
+                # reused for every candidate's electrostatic cost
+                K = self.ewald.compute_A_matrix(positions, cell, batch,
+                                                not self.remove_self_interaction)
+                latent_charges, frontier_reference_charges, frontier_occupation, \
+                    smooth_min = self.model_b(z_raw, latent_local_addition, K, batch,
+                                              carrier_count, n_batch,
+                                              reference_total_charge)
+                if compute_energy:
+                    onehot = segment_onehot(batch, n_batch, positions.dtype)
+                    # the candidates' electrostatic cost already sits inside the smooth
+                    # minimum, so the reference charges -- not the reported ones -- are
+                    # what the electrostatic term is built from
+                    frontier_reference_energy = quadratic_energy(
+                        K, frontier_reference_charges, onehot)
+                    frontier_addition_energy = (
+                        carrier_count.reshape(-1).to(dtype=positions.dtype) * smooth_min)
+                    frontier_energy = (frontier_reference_energy
+                                       + frontier_addition_energy)
 
         # compute the long-range interactions
-        if qeq_energy is not None:
+        if frontier_energy is not None:
+            E_lr, q_induced, u_induced = frontier_energy, None, None
+        elif qeq_energy is not None:
             E_lr, q_induced, u_induced = qeq_energy, None, None
         elif compute_energy:
             E_lr, q_induced, u_induced = self.ewald(q=latent_charges,
@@ -336,6 +464,19 @@ class Les(nn.Module):
             'latent_alphas': latent_alphas,
             'BEC': bec,
             }
+        if self.use_model0 or self.use_model0_a or self.use_model_b:
+            output['occupation'] = frontier_occupation
+            output['reference_charges'] = frontier_reference_charges
+        if self.use_model0_a:
+            output['occupation_add'] = frontier_occupation_add
+            output['occupation_remove'] = frontier_occupation_remove
+            output['reference_charge_deficit'] = frontier_charge_deficit
+            output['removal_gate'] = frontier_removal_gate
+        if self.use_model_b:
+            # E_lr already sums these two; they are returned for diagnosis, not to be
+            # added again
+            output['E_reference_lr'] = frontier_reference_energy
+            output['E_frontier'] = frontier_addition_energy
         return output
 
 class _DummyAtomwise(nn.Module):

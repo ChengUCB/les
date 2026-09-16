@@ -15,3 +15,11 @@ from les.module.atomicalpha import *
 from les.module.qeq import *
 
 from les.module.nqe import *
+
+from les.module.frontier import *
+
+from les.module.model0 import *
+
+from les.module.model0_a import *
+
+from les.module.model_b import *

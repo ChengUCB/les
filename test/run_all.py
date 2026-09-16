@@ -43,6 +43,8 @@ SCRIPT_TARGETS = [
     ("test/test_torch_all_features.py", [], True),                 # TorchScript, all terms
     ("test/test_qeq.py", [], True),                                # Qeq/NQE solve + scripting
     ("test/test_qeq_physics.py", [], True),                        # Qeq/NQE physics vs closed forms
+    ("test/test_frontier.py", [], True),                           # Model 0 / Model B frontier allocation
+    ("test/test_model0_a.py", [], True),                           # Model 0-a two-head allocation
     ("test/test_torch_dipole.py", [], False),
     ("test/test_les_class.py", [], False),
     ("test/test_bec.py", [], False),
