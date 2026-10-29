@@ -1,6 +1,8 @@
+import math
+
 import torch
 import torch.nn as nn
-from typing import Tuple
+from typing import Optional, Tuple
 
 from les.module.frontier import segment_onehot, segment_softmax
 
@@ -56,6 +58,7 @@ class Model0A(nn.Module):
                  epsilon_e: float = 1.0,
                  carrier_sign: float = -1.0,
                  charge_switch_width: float = 0.01,
+                 beta_trainable: bool = False,
                  ):
         super().__init__()
         if beta <= 0.0:
@@ -68,6 +71,8 @@ class Model0A(nn.Module):
         if float(carrier_sign) not in (-1.0, 1.0):
             raise ValueError(f"carrier_sign must be -1 or +1, got {carrier_sign}")
         self.beta = float(beta)
+        # beta_trainable: beta = exp(log_beta), trained from the given beta (kept positive)
+        self.log_beta = nn.Parameter(torch.tensor(math.log(self.beta))) if beta_trainable else None
         self.scale = float(epsilon_e) ** 0.5
         self.carrier_sign = float(carrier_sign)
         self.switch_width = float(charge_switch_width)
@@ -79,12 +84,17 @@ class Model0A(nn.Module):
                 carrier_count: torch.Tensor,          # [n_batch]
                 n_batch: int,
                 reference_total_charge: torch.Tensor,  # [n_batch], physical
+                host_mask: Optional[torch.Tensor] = None,  # [n_atoms] bool
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
                            torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (z_final, z_ref, p_selected, p_add, p_rem, deficit, gate).
 
         Charges are in LES units; the deficit is physical; occupations and the gate
         are dimensionless.
+
+        host_mask restricts which atoms may host the carrier (e.g. Ti only): the others get
+        p_add = p_rem = 0, so they take no share of the reference correction either (as
+        Model 0 with constrain_charge, whose correction also uses the masked p).
         """
         dtype = z_raw.dtype
         if frontier.dim() != 2 or frontier.shape[1] != 2:
@@ -93,10 +103,19 @@ class Model0A(nn.Module):
         onehot = segment_onehot(batch, n_batch, dtype)
         onehot_t = onehot.transpose(0, 1)
         z_raw = z_raw.reshape(-1)
+        # getattr: modules pickled before beta_trainable existed have no log_beta (fixed beta)
+        beta = self.beta if getattr(self, 'log_beta', None) is None else self.log_beta.exp().to(dtype)
         frontier = frontier.to(dtype=dtype)
 
-        p_add = segment_softmax(-self.beta * frontier[:, 0], onehot)
-        p_rem = segment_softmax(-self.beta * frontier[:, 1], onehot)
+        s_add = -beta * frontier[:, 0]
+        s_rem = -beta * frontier[:, 1]
+        if host_mask is not None:
+            # a finite floor, not -inf (see frontier._segment_max); exp underflows to 0
+            host = host_mask.reshape(-1)
+            s_add = torch.where(host, s_add, s_add.detach().min() - 1.0e4)
+            s_rem = torch.where(host, s_rem, s_rem.detach().min() - 1.0e4)
+        p_add = segment_softmax(s_add, onehot)
+        p_rem = segment_softmax(s_rem, onehot)
 
         # the deficit is a ratio of physical charges, so the gate width keeps its
         # meaning in e when epsilon_e changes

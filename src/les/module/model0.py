@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
@@ -39,11 +41,14 @@ class Model0(nn.Module):
                  epsilon_e: float = 1.0,
                  constrain_charge: bool = False,
                  carrier_sign: float = -1.0,
+                 beta_trainable: bool = False,
                  ):
         super().__init__()
         if epsilon_e <= 0.0:
             raise ValueError(f"epsilon_e must be positive, got {epsilon_e}")
         self.beta = float(beta)
+        # beta_trainable: beta = exp(log_beta), trained from the given beta (kept positive)
+        self.log_beta = nn.Parameter(torch.tensor(math.log(self.beta))) if beta_trainable else None
         self.scale = float(epsilon_e) ** 0.5
         self.constrain_charge = bool(constrain_charge)
         self.carrier_sign = float(carrier_sign)
@@ -55,14 +60,26 @@ class Model0(nn.Module):
                 carrier_count: torch.Tensor,                      # [n_batch]
                 n_batch: int,
                 reference_total_charge: Optional[torch.Tensor] = None,  # [n_batch]
+                host_mask: Optional[torch.Tensor] = None,                # [n_atoms] bool
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Returns (z_final, z_ref, p), all in LES charge units."""
+        """Returns (z_final, z_ref, p), all in LES charge units.
+
+        host_mask restricts which atoms may host the carrier (e.g. Ti only): the others get p = 0,
+        so with constrain_charge they also take no share of the correction (which uses p).
+        """
         dtype = z_raw.dtype
         onehot = segment_onehot(batch, n_batch, dtype)
         onehot_t = onehot.transpose(0, 1)
         z_raw = z_raw.reshape(-1)
+        # getattr: modules pickled before beta_trainable existed have no log_beta (fixed beta)
+        beta = self.beta if getattr(self, 'log_beta', None) is None else self.log_beta.exp().to(dtype)
 
-        p = segment_softmax(-self.beta * epsilon.reshape(-1).to(dtype=dtype), onehot)
+        scores = -beta * epsilon.reshape(-1).to(dtype=dtype)
+        if host_mask is not None:
+            # a finite floor, not -inf (see frontier._segment_max); exp underflows to 0
+            floor = scores.detach().min() - 1.0e4
+            scores = torch.where(host_mask.reshape(-1), scores, floor)
+        p = segment_softmax(scores, onehot)
 
         if self.constrain_charge:
             if reference_total_charge is None:

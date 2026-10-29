@@ -111,6 +111,7 @@ class Les(nn.Module):
                                  "per structure, which a single batch-wide coupling "
                                  "matrix cannot represent")
             frontier_args = dict(beta=self.frontier_beta,
+                                 beta_trainable=self.frontier_beta_trainable,
                                  epsilon_e=self.frontier_epsilon_e,
                                  constrain_charge=self.frontier_constrain_charge,
                                  carrier_sign=self.frontier_carrier_sign)
@@ -122,9 +123,14 @@ class Les(nn.Module):
                 self.model0_a = Model0A(
                     beta=self.frontier_beta, epsilon_e=self.frontier_epsilon_e,
                     carrier_sign=self.frontier_carrier_sign,
-                    charge_switch_width=self.frontier_charge_switch_width)
+                    charge_switch_width=self.frontier_charge_switch_width,
+                    beta_trainable=self.frontier_beta_trainable)
             else:
                 self.model_b = ModelB(**frontier_args)
+        if self.frontier_host_z is not None and not (self.use_model0 or self.use_model0_a
+                                                     or self.use_model_b):
+            raise ValueError("frontier_host_z is implemented for use_model0, use_model0_a and "
+                             "use_model_b only")
 
         self.bec = BEC(
              remove_mean=self.remove_mean,
@@ -183,6 +189,11 @@ class Les(nn.Module):
             'frontier_constrain_charge', False)
         # -1 for an added electron, +1 for an added hole
         self.frontier_carrier_sign = les_arguments.get('frontier_carrier_sign', -1)
+        # atomic numbers that may host the carrier (e.g. [22] for Ti); the other atoms get zero
+        # occupation. None = every atom
+        self.frontier_host_z = les_arguments.get('frontier_host_z', None)
+        # learn beta (as log beta, starting at frontier_beta) instead of keeping it fixed
+        self.frontier_beta_trainable = bool(les_arguments.get('frontier_beta_trainable', False))
         # width in e over which Model 0-a blends the addition and removal heads
         self.frontier_charge_switch_width = les_arguments.get(
             'frontier_charge_switch_width', 0.01)
@@ -206,6 +217,8 @@ class Les(nn.Module):
             'use_model0': False,
             'use_model0_a': False,
             'use_model_b': False,
+            'frontier_host_z': None,
+            'frontier_beta_trainable': False,
         }.items():
             state.setdefault(key, default)
         super().__setstate__(state)
@@ -367,12 +380,19 @@ class Les(nn.Module):
                 'the frontier models support a single charge channel only'
             z_raw = latent_charges.reshape(-1)
             n_batch = cell.shape[0]
+            host_mask = None
+            if self.frontier_host_z is not None:
+                if atomic_numbers is None:
+                    raise ValueError("atomic_numbers must be provided when "
+                                     "frontier_host_z is set")
+                host_mask = torch.isin(atomic_numbers.reshape(-1), torch.tensor(
+                    self.frontier_host_z, device=atomic_numbers.device))
             if self.use_model0:
                 if latent_frontier is None:
                     raise ValueError("latent_frontier is required when use_model0 is set")
                 latent_charges, frontier_reference_charges, frontier_occupation = \
                     self.model0(z_raw, latent_frontier, batch, carrier_count, n_batch,
-                                reference_total_charge)
+                                reference_total_charge, host_mask=host_mask)
             elif self.use_model0_a:
                 if latent_frontier is None:
                     raise ValueError("latent_frontier is required when use_model0_a is "
@@ -385,7 +405,7 @@ class Les(nn.Module):
                  frontier_occupation_add, frontier_occupation_remove,
                  frontier_charge_deficit, frontier_removal_gate) = self.model0_a(
                     z_raw, latent_frontier, batch, carrier_count, n_batch,
-                    reference_total_charge)
+                    reference_total_charge, host_mask=host_mask)
             else:
                 if latent_local_addition is None:
                     raise ValueError("latent_local_addition is required when "
@@ -397,7 +417,8 @@ class Les(nn.Module):
                 latent_charges, frontier_reference_charges, frontier_occupation, \
                     smooth_min = self.model_b(z_raw, latent_local_addition, K, batch,
                                               carrier_count, n_batch,
-                                              reference_total_charge)
+                                              reference_total_charge,
+                                              host_mask=host_mask)
                 if compute_energy:
                     onehot = segment_onehot(batch, n_batch, positions.dtype)
                     # the candidates' electrostatic cost already sits inside the smooth

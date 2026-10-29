@@ -1,3 +1,5 @@
+import math
+
 import torch
 import torch.nn as nn
 from typing import Optional, Tuple
@@ -40,6 +42,10 @@ class ModelB(nn.Module):
     computed in a fixed order -- weights from the raw charges, occupation from the
     corrected ones -- which keeps the total charge exact without a solver. This is a
     choice of this implementation, not a self-consistent stationary point.
+
+    host_mask restricts which atoms may host the carrier (e.g. Ti only): the others get
+    zero occupation and drop out of the smooth minimum. It applies to the carrier placement
+    only; the constrain_charge weights still run over every atom.
     """
 
     def __init__(self,
@@ -47,11 +53,14 @@ class ModelB(nn.Module):
                  epsilon_e: float = 1.0,
                  constrain_charge: bool = False,
                  carrier_sign: float = -1.0,
+                 beta_trainable: bool = False,
                  ):
         super().__init__()
         if epsilon_e <= 0.0:
             raise ValueError(f"epsilon_e must be positive, got {epsilon_e}")
         self.beta = float(beta)
+        # beta_trainable: beta = exp(log_beta), trained from the given beta (kept positive)
+        self.log_beta = nn.Parameter(torch.tensor(math.log(self.beta))) if beta_trainable else None
         self.scale = float(epsilon_e) ** 0.5
         self.constrain_charge = bool(constrain_charge)
         self.carrier_sign = float(carrier_sign)
@@ -71,12 +80,15 @@ class ModelB(nn.Module):
                 carrier_count: torch.Tensor,                      # [n_batch]
                 n_batch: int,
                 reference_total_charge: Optional[torch.Tensor] = None,  # [n_batch]
+                host_mask: Optional[torch.Tensor] = None,                # [n_atoms] bool
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (z_report, z_ref, p, G); charges in LES units, G per structure."""
         dtype = z_raw.dtype
         onehot = segment_onehot(batch, n_batch, dtype)
         onehot_t = onehot.transpose(0, 1)
         z_raw = z_raw.reshape(-1)
+        # getattr: modules pickled before beta_trainable existed have no log_beta (fixed beta)
+        beta = self.beta if getattr(self, 'log_beta', None) is None else self.log_beta.exp().to(dtype)
         a = a.reshape(-1).to(dtype=dtype)
 
         if self.constrain_charge:
@@ -85,16 +97,20 @@ class ModelB(nn.Module):
                                  "frontier_constrain_charge is set; neutrality is not "
                                  "assumed on your behalf")
             weights = segment_softmax(
-                -self.beta * self.candidate_costs(a, K, z_raw), onehot)
+                -beta * self.candidate_costs(a, K, z_raw), onehot)
             q_ref = reference_total_charge.reshape(-1).to(dtype=dtype)
             deficit = q_ref / self.scale - torch.matmul(onehot, z_raw)   # [n_batch]
             z_ref = z_raw + weights * torch.matmul(onehot_t, deficit)
         else:
             z_ref = z_raw
 
-        scores = -self.beta * self.candidate_costs(a, K, z_ref)
+        scores = -beta * self.candidate_costs(a, K, z_ref)
+        if host_mask is not None:
+            # a finite floor, not -inf (see frontier._segment_max); exp underflows to 0
+            floor = scores.detach().min() - 1.0e4
+            scores = torch.where(host_mask.reshape(-1), scores, floor)
         p = segment_softmax(scores, onehot)
-        smooth_min = -segment_logsumexp(scores, onehot) / self.beta       # [n_batch]
+        smooth_min = -segment_logsumexp(scores, onehot) / beta       # [n_batch]
 
         carrier = carrier_count.reshape(-1).to(dtype=dtype)
         k = self.carrier_sign / self.scale
