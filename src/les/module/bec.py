@@ -23,6 +23,7 @@ class BEC(nn.Module):
                 u: Optional[torch.Tensor] = None, # [n_atoms, 3]
                 batch: Optional[torch.Tensor] = None,
                 output_index: Optional[int] = None, # 0, 1, 2 to select only one component
+                r_q: Optional[torch.Tensor] = None, # [n_atoms, 3] charge sites, functions of r; None: at r
                 ) -> torch.Tensor:
 
         if q.dim() == 1:
@@ -45,6 +46,11 @@ class BEC(nn.Module):
             batch = torch.zeros(n, dtype=torch.int64, device=r.device)
         unique_batches = torch.unique(batch)  # Get unique batch indices
 
+        # P from the charge sites, differentiated with respect to r
+        if r_q is None:
+            r_q = r
+        assert r_q.shape == r.shape, 'r_q dimension error'
+
         # compute the polarization for each batch
         all_P = []
         all_P_u = []
@@ -52,7 +58,7 @@ class BEC(nn.Module):
         all_projections = []
         for i in unique_batches.long():
             mask = batch == i  # Create a mask for the i-th configuration
-            r_now, q_now = r[mask], q[mask]
+            r_now, q_now = r_q[mask], q[mask]
 
             if self.remove_mean:
                 q_now = q_now - torch.mean(q_now, dim=0, keepdim=True)

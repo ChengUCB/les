@@ -158,7 +158,7 @@ def check_no_self_removal(is_periodic, terms, label):
     return fails
 
 
-def check_latent_grads(is_periodic, label):
+def check_latent_grads(is_periodic, label, terms="all-grads"):
     """L: differentiate the latent multipoles too, in float64 on the CPU.
 
     Gates B-E differentiate positions only, but in a trained model every
@@ -176,8 +176,9 @@ def check_latent_grads(is_periodic, label):
     dev = torch.device("cpu")   # this is the backend the codegen gap lives in
 
     def _build():
-        vec = H.build(is_periodic, "all-grads", dev)
-        args = H.pack_all_grads(*H.make_single(dev, torch.float64, 6, is_periodic))
+        vec = H.build(is_periodic, terms, dev)
+        args = H.pack_all_grads(*H.make_single(dev, torch.float64, 6, is_periodic),
+                                offsets=terms != "all-grads")
         return vec, args, vec(*args)
 
     def body_compile(_dev):
@@ -189,7 +190,7 @@ def check_latent_grads(is_periodic, label):
     def body_aoti(_dev):
         vec, args, ref = _build()
         nat = torch.export.Dim("natoms", min=2, max=1 << 20)
-        dyn = {n: ({0: nat} if n != "cell" else None) for n in H.ARG_NAMES["all-grads"]}
+        dyn = {n: ({0: nat} if n != "cell" else None) for n in H.ARG_NAMES[terms]}
         ep = torch.export.export(vec, args, dynamic_shapes=dyn)
         aoti = torch._inductor.aoti_load_package(
             torch._inductor.aoti_compile_and_package(ep))
@@ -209,7 +210,8 @@ def check_latent_grads(is_periodic, label):
 def main():
     fails = []
     for is_periodic, pname in ((True, "periodic"), (False, "realspace")):
-        for terms in ("q", "q+u", "q+u+Q", "q+u+Q+k+a"):
+        # +o: every term with charge offsets
+        for terms in ("q", "q+u", "q+u+Q", "q+u+Q+k+a", "q+u+Q+k+a+o"):
             label = f"{pname} [{terms}]"
             print(f"\n================ {label} ================")
             fails += check_compile_export(is_periodic, terms, label)
@@ -220,6 +222,7 @@ def main():
         # once per periodicity: the full term set with every multipole
         # differentiated, which is the shape of a real model's graph
         fails += check_latent_grads(is_periodic, f"{pname} [latent-grads]")
+        fails += check_latent_grads(is_periodic, f"{pname} [latent-grads+o]", terms="all-grads+o")
 
     print("\n==================== SUMMARY ====================")
     if fails:

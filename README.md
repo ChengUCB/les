@@ -52,6 +52,9 @@ One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self
 ## 📣 Update 
 
 
+### 18th Nov 2026
+Charge offsets are added (`charge_offset_mode: True`): the latent multipoles of each atom can sit off the atom, at r_i + δ_i.
+
 ### 6th Aug 2026
 Now the extended **LES (Latent Ewald Summation)** with multipoles is fully torch.compile-friendly.
 Documents are added.

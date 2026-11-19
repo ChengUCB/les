@@ -59,6 +59,7 @@ def _run(model, inputs):
         atomic_numbers=inputs['atomic_numbers'],
         batch=inputs['batch'],
         compute_bec=inputs['compute_bec'],
+        latent_offsets=inputs.get('latent_offsets'),
     )
 
 
@@ -115,14 +116,16 @@ def test_backward_compat_old_checkpoint_scriptable_and_consistent():
     torch.save(model, buf); buf.seek(0)
     obj = torch.load(buf, weights_only=False)
     for flag in ('use_atomwise', 'use_fixed_atomic_charges',
-                 'use_atomic_alpha', 'use_epsilon_r_scaling'):
+                 'use_atomic_alpha', 'use_epsilon_r_scaling',
+                 'charge_offset_mode', 'charge_offset_max'):
         obj.__dict__.pop(flag, None)
     buf2 = io.BytesIO()
     torch.save(obj, buf2); buf2.seek(0)
     migrated = torch.load(buf2, weights_only=False)
 
     for flag in ('use_atomwise', 'use_fixed_atomic_charges',
-                 'use_atomic_alpha', 'use_epsilon_r_scaling'):
+                 'use_atomic_alpha', 'use_epsilon_r_scaling',
+                 'charge_offset_mode', 'charge_offset_max'):
         assert hasattr(migrated, flag), f"__setstate__ did not restore {flag}"
 
     # Old checkpoints predate use_atomic_alpha, so it is restored to False;
@@ -132,7 +135,22 @@ def test_backward_compat_old_checkpoint_scriptable_and_consistent():
     _assert_scripted_matches_eager(migrated, compat_inputs, "backward-compat")
 
 
+def test_charge_offsets_scriptable_and_consistent():
+    """charge_offset_mode on both vectorised paths: scripted == eager after
+    save/reload, with the new latent_offsets input and output."""
+    for is_periodic in (True, False):
+        inputs = _build_inputs()
+        inputs['latent_offsets'] = 0.3 * torch.sin(3.0 * inputs['positions'].detach())
+        model = Les(les_arguments={'is_periodic': is_periodic,
+                                   'charge_offset_mode': True,
+                                   'use_atomic_alpha': True})
+        label = f"offsets-{'periodic' if is_periodic else 'realspace'}"
+        _assert_scripted_matches_eager(model, inputs, label)
+        assert _run(model, inputs)['latent_offsets'] is not None, label
+
+
 if __name__ == "__main__":
     test_all_features_scriptable_and_consistent()
     test_backward_compat_old_checkpoint_scriptable_and_consistent()
+    test_charge_offsets_scriptable_and_consistent()
     print("\nAll TorchScript regression checks passed.")

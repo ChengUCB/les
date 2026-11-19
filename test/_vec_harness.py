@@ -235,9 +235,44 @@ class WrapLatentGrad(torch.nn.Module):
         return E.detach(), torch.cat([g.reshape(-1) for g in grads])
 
 
+class WrapFullOffsets(torch.nn.Module):
+    """every term, with the multipoles displaced by latent charge offsets"""
+    def __init__(self, is_periodic):
+        super().__init__()
+        self.les = Les({"is_periodic": is_periodic, "sigma": SIGMA, "dl": DL,
+                        "remove_self_interaction": REMOVE_SELF_INTERACTION,
+                        "charge_offset_mode": True})
+
+    def forward(self, positions, latent_charges, latent_dipoles, latent_quads,
+                latent_kappas, latent_alphas, latent_offsets, cell, batch):
+        E = self.les(positions=positions, latent_charges=latent_charges,
+                     latent_dipoles=latent_dipoles, latent_quads=latent_quads,
+                     latent_kappas=latent_kappas, latent_alphas=latent_alphas,
+                     latent_offsets=latent_offsets, cell=cell, batch=batch,
+                     compute_bec=False)["E_lr"].sum()
+        F = -torch.autograd.grad(E, positions)[0]
+        return E.detach(), F
+
+
+class WrapLatentGradOffsets(WrapFullOffsets):
+    """WrapLatentGrad with charge offsets: the offsets are a network output too"""
+    def forward(self, positions, latent_charges, latent_dipoles, latent_quads,
+                latent_kappas, latent_alphas, latent_offsets, cell, batch):
+        E = self.les(positions=positions, latent_charges=latent_charges,
+                     latent_dipoles=latent_dipoles, latent_quads=latent_quads,
+                     latent_kappas=latent_kappas, latent_alphas=latent_alphas,
+                     latent_offsets=latent_offsets, cell=cell, batch=batch,
+                     compute_bec=False)["E_lr"].sum()
+        grads = torch.autograd.grad(
+            E, [positions, latent_charges, latent_dipoles, latent_quads,
+                latent_kappas, latent_alphas, latent_offsets])
+        return E.detach(), torch.cat([g.reshape(-1) for g in grads])
+
+
 # term sets exercised end to end; extend as further multipoles land
 WRAPPERS = {"q": WrapQ, "q+u": WrapQU, "q+u+Q": WrapQUQuad,
-            "q+u+Q+k+a": WrapFull, "all-grads": WrapLatentGrad}
+            "q+u+Q+k+a": WrapFull, "all-grads": WrapLatentGrad,
+            "q+u+Q+k+a+o": WrapFullOffsets, "all-grads+o": WrapLatentGradOffsets}
 ARG_NAMES = {
     "q": ["positions", "latent_charges", "cell", "batch"],
     "q+u": ["positions", "latent_charges", "latent_dipoles", "cell", "batch"],
@@ -248,6 +283,14 @@ ARG_NAMES = {
     "all-grads": ["positions", "latent_charges", "latent_dipoles", "latent_quads",
                   "latent_kappas", "latent_alphas", "cell", "batch"],
 }
+ARG_NAMES["q+u+Q+k+a+o"] = ARG_NAMES["all-grads+o"] = [
+    "positions", "latent_charges", "latent_dipoles", "latent_quads",
+    "latent_kappas", "latent_alphas", "latent_offsets", "cell", "batch"]
+
+
+def offsets_for(r):
+    """Deterministic charge offsets (|delta| <= 0.3 A) that leave the RNG alone."""
+    return 0.3 * torch.sin(1.7 * r.detach())
 
 
 def build(is_periodic, terms, device):
@@ -264,18 +307,22 @@ def pack(r, q, u, quad, kappa, alpha, cell, batch, terms):
         return (r, q, u, cell, batch)
     if terms == "q+u+Q":
         return (r, q, u, quad, cell, batch)
+    if terms.endswith("+o"):
+        return (r, q, u, quad, kappa, alpha, offsets_for(r), cell, batch)
     return (r, q, u, quad, kappa, alpha, cell, batch)
 
 
-def pack_all_grads(r, q, u, quad, kappa, alpha, cell, batch):
+def pack_all_grads(r, q, u, quad, kappa, alpha, cell, batch, offsets=False):
     """Args for WrapLatentGrad: every multipole is a differentiable input."""
-    return (r.detach().requires_grad_(True),
+    args = (r.detach().requires_grad_(True),
             q.detach().requires_grad_(True),
             u.detach().requires_grad_(True),
             quad.detach().requires_grad_(True),
             kappa.detach().requires_grad_(True),
-            alpha.detach().requires_grad_(True),
-            cell, batch)
+            alpha.detach().requires_grad_(True))
+    if offsets:
+        args = args + (offsets_for(r).requires_grad_(True),)
+    return args + (cell, batch)
 
 
 def _close(a, b, rtol, atol):

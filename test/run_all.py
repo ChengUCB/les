@@ -33,6 +33,7 @@ SRC = os.path.join(REPO, "src")
 PYTEST_TARGETS = [
     "test/test_ewald_realspace",
     "src/les/tests",
+    "test/test_charge_offsets.py",                                 # off-site charges
 ]
 
 # script targets: (path, extra argv, checks_itself)

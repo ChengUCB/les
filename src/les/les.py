@@ -15,7 +15,8 @@ __all__ = ['Les']
 
 class Les(nn.Module):
 
-    __constants__ = ['use_fixed_atomic_charges', 'use_atomic_alpha', 'use_atomwise', 'use_epsilon_r_scaling']
+    __constants__ = ['use_fixed_atomic_charges', 'use_atomic_alpha', 'use_atomwise', 'use_epsilon_r_scaling',
+                     'charge_offset_mode']
     def __init__(self, les_arguments: Union[Dict[str, Any], str] = {}):
         """
         LES model for long-range interations
@@ -94,6 +95,11 @@ class Les(nn.Module):
         self.use_atomic_alpha = les_arguments.get('use_atomic_alpha', False)
         self.use_epsilon_r_scaling = les_arguments.get('use_epsilon_r_scaling', False)
 
+        # charge offsets: the multipoles of atom i sit at r_i + delta_i, delta_i from latent_offsets
+        self.charge_offset_mode = les_arguments.get('charge_offset_mode', False)
+        charge_offset_max = les_arguments.get('charge_offset_max', 1.0) # soft cap on |delta| (Angstrom); 0 or None: no cap
+        self.charge_offset_max = float(charge_offset_max) if charge_offset_max is not None else 0.0
+
     def __setstate__(self, state: Dict[str, Any]):
         # Backward compatibility
         for key, default in {
@@ -103,6 +109,8 @@ class Les(nn.Module):
             'use_epsilon_r_scaling': False,
             'is_periodic': None,
             'N_max': 10,
+            'charge_offset_mode': False,
+            'charge_offset_max': 1.0,
         }.items():
             state.setdefault(key, default)
         super().__setstate__(state)
@@ -123,6 +131,7 @@ class Les(nn.Module):
                compute_field: bool = False,
                compute_bec: bool = False,
                bec_output_index: Optional[int] = None, # option to compute BEC components along only one direction
+               latent_offsets: Optional[torch.Tensor] = None, # [n_atoms, 3]
                ) -> Dict[str, Optional[torch.Tensor]]:
         # check the input shapes
         if batch is None:
@@ -151,6 +160,17 @@ class Les(nn.Module):
             elif latent_alphas.dim() == 3:
                 latent_alphas = latent_alphas + baseline_alphas[:,None,None] * torch.eye(3, device=baseline_alphas.device).unsqueeze(0) # [n_atoms, 3, 3]
 
+        # sites of the latent multipoles, r + delta with charge offsets: built in the autograd graph, never wrapped
+        sites = positions
+        offsets: Optional[torch.Tensor] = None
+        if self.charge_offset_mode:
+            if latent_offsets is None:
+                raise ValueError("charge_offset_mode is True, so latent_offsets must be provided")
+            assert latent_offsets.shape == positions.shape, 'latent_offsets must be [n_atoms, 3]'
+            offsets = self._cap_offsets(latent_offsets.to(dtype=positions.dtype))
+            sites = positions + offsets
+        elif latent_offsets is not None:
+            raise ValueError("latent_offsets given, but charge_offset_mode is False")
 
         # compute the long-range interactions
         if compute_energy:
@@ -159,7 +179,7 @@ class Les(nn.Module):
                               kappa=latent_kappas,
                               alpha=latent_alphas,
                               quad=latent_quads,
-                              r=positions,
+                              r=sites,
                               cell=cell,
                               batch=batch,
                               compute_field=compute_field,
@@ -188,6 +208,7 @@ class Les(nn.Module):
                            cell=cell,
                            batch=batch,
                            output_index=bec_output_index,
+                           r_q=sites,
 		           )
         else:
             bec = None
@@ -200,7 +221,15 @@ class Les(nn.Module):
             'latent_alphas': latent_alphas,
             'BEC': bec,
             }
+        if offsets is not None:
+            output['latent_offsets'] = offsets
         return output
+
+    def _cap_offsets(self, v: torch.Tensor) -> torch.Tensor:
+        # delta = v / sqrt(1 + |v|^2 / d^2), smooth at v = 0; pow, not rsqrt, for AOTInductor export
+        if self.charge_offset_max > 0.0:
+            return v * (1.0 + (v * v).sum(dim=-1, keepdim=True) / self.charge_offset_max ** 2).pow(-0.5)
+        return v
 
 class _DummyAtomwise(nn.Module):
     def forward(self, desc: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
