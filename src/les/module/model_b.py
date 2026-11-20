@@ -66,9 +66,18 @@ class ModelB(nn.Module):
         self.carrier_sign = float(carrier_sign)
 
     def candidate_costs(self, a: torch.Tensor, K: torch.Tensor,
-                        z: torch.Tensor) -> torch.Tensor:
-        """epsilon_i for every atom as the carrier's host, [n_atoms]."""
+                        z: torch.Tensor,
+                        K_carrier: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
+                        ) -> torch.Tensor:
+        """epsilon_i for every atom as the carrier's host, [n_atoms].
+
+        K_carrier = (K_ch, K_cc) from Ewald_vectorized.compute_carrier_coupling when the carrier has a
+        Gaussian width of its own: epsilon_i = a_i + k (K_ch z)_i + 1/2 k^2 K_cc_i; None (default) is the
+        carrier of the host width, K_ch = K, K_cc = diag K."""
         k = self.carrier_sign / self.scale
+        if K_carrier is not None:
+            K_ch, K_cc = K_carrier
+            return a + k * torch.matmul(K_ch, z) + (0.5 * k * k) * K_cc
         return (a + k * torch.matmul(K, z)
                 + (0.5 * k * k) * torch.diagonal(K))
 
@@ -81,6 +90,7 @@ class ModelB(nn.Module):
                 n_batch: int,
                 reference_total_charge: Optional[torch.Tensor] = None,  # [n_batch]
                 host_mask: Optional[torch.Tensor] = None,                # [n_atoms] bool
+                K_carrier: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,  # candidate_costs
                 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Returns (z_report, z_ref, p, G); charges in LES units, G per structure."""
         dtype = z_raw.dtype
@@ -97,14 +107,14 @@ class ModelB(nn.Module):
                                  "frontier_constrain_charge is set; neutrality is not "
                                  "assumed on your behalf")
             weights = segment_softmax(
-                -beta * self.candidate_costs(a, K, z_raw), onehot)
+                -beta * self.candidate_costs(a, K, z_raw, K_carrier), onehot)
             q_ref = reference_total_charge.reshape(-1).to(dtype=dtype)
             deficit = q_ref / self.scale - torch.matmul(onehot, z_raw)   # [n_batch]
             z_ref = z_raw + weights * torch.matmul(onehot_t, deficit)
         else:
             z_ref = z_raw
 
-        scores = -beta * self.candidate_costs(a, K, z_ref)
+        scores = -beta * self.candidate_costs(a, K, z_ref, K_carrier)
         if host_mask is not None:
             # a finite floor, not -inf (see frontier._segment_max); exp underflows to 0
             floor = scores.detach().min() - 1.0e4

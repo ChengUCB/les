@@ -245,6 +245,74 @@ class Ewald_vectorized(nn.Module):
                 A = A - torch.eye(N, device=device, dtype=dtype) * self_diag
         return A
 
+    def compute_carrier_coupling(self, r, cell, batch: Optional[torch.Tensor],
+                                 sigma_c: torch.Tensor,
+                                 self_interaction: bool = True
+                                 ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        compute_A_matrix for a carrier charge whose Gaussian width sigma_c differs from the host
+        charges' sigma, for Model B's candidate costs when a carrier width is trained (Les
+        carrier_width_t). Periodic only.
+
+        A charge of width s enters the structure factor as q exp(-s^2 k^2 / 4) e^{ik.r}, so two
+        charges of widths s_a, s_b have the pair factor exp(-s_ab^2 k^2 / 2) and the on-site
+        (self) term norm_factor * 2/(s_ab (2 pi)^{3/2}), s_ab^2 = (s_a^2 + s_b^2) / 2;
+        s_a = s_b = sigma is compute_A_matrix. Returns
+            K_ch [N, N]  carrier on atom i with the host charge on atom j, s_ch^2 = (sigma_c^2 + sigma^2) / 2
+            K_cc [N]     the carrier on atom i with itself, width sigma_c
+        with the self term on the diagonal as compute_A_matrix(self_interaction) puts it. With
+        sigma_c = sigma they are compute_A_matrix and its diagonal.
+        """
+        if not self.is_periodic:
+            raise ValueError("compute_carrier_coupling is implemented for the periodic case only")
+        device = r.device
+        dtype = r.dtype
+        N = r.shape[0]
+        if batch is None:
+            batch = torch.zeros(N, dtype=torch.int64, device=device)
+        else:
+            batch = batch.to(device=device, dtype=torch.long)
+        same_batch = batch.unsqueeze(1) == batch.unsqueeze(0)                # [N, N]
+        zero = torch.zeros((), device=device, dtype=dtype)
+        sigma_c = sigma_c.to(device=device, dtype=dtype)
+        s_ch_sq = 0.5 * (sigma_c ** 2 + self.sigma ** 2)
+        s_cc_sq = sigma_c ** 2
+
+        cell = cell.to(dtype=dtype)
+        B = cell.shape[0]
+        nvec = self.nvec_all.to(device=device, dtype=dtype)                  # [K, 3]
+        K = nvec.shape[0]
+        # the k-grid and masks of compute_A_matrix; only the width in the k-factor differs
+        G = 2 * torch.pi * torch.linalg.inv(cell).transpose(-2, -1)          # [B, 3, 3]
+        volume = torch.det(cell)                                             # [B]
+        kvec = torch.bmm(nvec.unsqueeze(0).expand(B, -1, -1), G)             # [B, K, 3]
+        k_sq = (kvec ** 2).sum(dim=-1)                                       # [B, K]
+        valid = ((k_sq > 0) & (k_sq <= self.k_sq_max)
+                 & self.hemisphere_mask.unsqueeze(0))                        # [B, K]
+        factors = self.factors.to(device=device, dtype=dtype)                # [K]
+        mask = factors.unsqueeze(0) * valid.to(dtype=dtype)                  # [B, K]
+        w_ch = torch.exp(-(0.5 * s_ch_sq) * k_sq) / (k_sq + 1e-12) * mask    # [B, K]
+        w_cc = torch.exp(-(0.5 * s_cc_sq) * k_sq) / (k_sq + 1e-12) * mask    # [B, K]
+
+        onehot = (batch.unsqueeze(0)
+                  == torch.arange(B, device=device).unsqueeze(1)).to(dtype)  # [B, N]
+        onehot_t = onehot.transpose(0, 1)                                    # [N, B]
+        kvec_at = torch.matmul(onehot_t, kvec.reshape(B, K * 3)).reshape(N, K, 3)
+        k_dot_r = (kvec_at * r.unsqueeze(1)).sum(dim=-1)                     # [N, K]
+        cos_kr = torch.cos(k_dot_r)
+        sin_kr = torch.sin(k_dot_r)
+        pref_ch = torch.matmul(onehot_t, w_ch * 2.0 / volume.view(B, 1))     # [N, K]
+        K_ch = (torch.matmul(cos_kr * pref_ch, cos_kr.transpose(0, 1))
+                + torch.matmul(sin_kr * pref_ch, sin_kr.transpose(0, 1)))    # [N, N]
+        K_ch = torch.where(same_batch, K_ch * self.norm_factor, zero)
+        # cos^2 + sin^2 = 1 on the diagonal: the carrier's self coupling depends on the cell only
+        K_cc = torch.matmul(onehot_t, (w_cc * 2.0 / volume.view(B, 1)).sum(dim=-1)) * self.norm_factor  # [N]
+        if not self_interaction:
+            K_ch = K_ch - torch.eye(N, device=device, dtype=dtype) * (
+                self.norm_factor * 2.0 / (torch.sqrt(s_ch_sq) * self.twopi ** 1.5))
+            K_cc = K_cc - self.norm_factor * 2.0 / (sigma_c * self.twopi ** 1.5)
+        return K_ch, K_cc
+
     def compute_A_matrix_padded(self, r, batch, slot, valid,
                                 self_interaction: bool = True) -> torch.Tensor:
         """

@@ -23,3 +23,5 @@ from les.module.model0 import *
 from les.module.model0_a import *
 
 from les.module.model_b import *
+
+from les.module.carrier import *

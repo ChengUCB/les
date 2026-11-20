@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from typing import Dict, Any, Union, Optional
+from typing import Dict, Any, Union, Optional, Tuple
 
 from .module import (
     Atomwise,
@@ -270,6 +270,17 @@ class Les(nn.Module):
         else:
             raise ValueError("Either desc or latent_charges must be provided")
 
+        # per-element raw charges (set by a trainer, e.g. polaron_mlip training/common.py --raw-charge-local):
+        # z_raw = raw_charge_species[Z] + raw_charge_local_scale * the atomwise (local) charge; scale 0 leaves the
+        # carrier allocation p as the only per-atom charge that can localize. Off unless the attribute exists.
+        raw_species = getattr(self, 'raw_charge_species', None)
+        if raw_species is not None:
+            if atomic_numbers is None:
+                raise ValueError("raw_charge_species needs atomic_numbers")
+            species_q = raw_species[atomic_numbers.reshape(-1).long()].to(latent_charges.dtype)
+            latent_charges = (species_q.reshape(latent_charges.shape)
+                              + float(getattr(self, 'raw_charge_local_scale', 1.0)) * latent_charges)
+
         if atomic_numbers is not None and self.use_fixed_atomic_charges:
             # the baseline is one value per atom, so it needs a channel axis when the
             # charges carry one -- a bare + would broadcast [n_atoms, 1] against
@@ -299,6 +310,7 @@ class Les(nn.Module):
         frontier_occupation_remove: Optional[torch.Tensor] = None
         frontier_charge_deficit: Optional[torch.Tensor] = None
         frontier_removal_gate: Optional[torch.Tensor] = None
+        frontier_carrier_sigma: Optional[torch.Tensor] = None   # Model B with carrier_width_t
         if self.use_qeq and latent_chi is not None:
             if atomic_numbers is None:
                 raise ValueError("atomic_numbers must be provided when use_qeq is True")
@@ -414,11 +426,34 @@ class Les(nn.Module):
                 # reused for every candidate's electrostatic cost
                 K = self.ewald.compute_A_matrix(positions, cell, batch,
                                                 not self.remove_self_interaction)
-                latent_charges, frontier_reference_charges, frontier_occupation, \
-                    smooth_min = self.model_b(z_raw, latent_local_addition, K, batch,
-                                              carrier_count, n_batch,
-                                              reference_total_charge,
-                                              host_mask=host_mask)
+                # carrier Gaussian width of its own (set by a trainer, e.g. polaron_mlip --pred-carrier-width):
+                # with a trained carrier_width_t, sigma_c = sigma + softplus(t) in the candidate costs; U(z_ref)
+                # keeps K. carrier_self_fixed: the carrier with its own periodic images keeps the LES width
+                # (K_cc = diag K), so sigma_c enters the carrier-host coupling K_ch only
+                K_carrier: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
+                carrier_width_t = getattr(self, 'carrier_width_t', None)
+                if carrier_width_t is not None:
+                    sigma_c = self.sigma + torch.nn.functional.softplus(
+                        carrier_width_t.to(dtype=positions.dtype))
+                    K_ch, K_cc = self.ewald.compute_carrier_coupling(
+                        positions, cell, batch, sigma_c, not self.remove_self_interaction)
+                    if getattr(self, 'carrier_self_fixed', False):
+                        K_cc = torch.diagonal(K)
+                    K_carrier = (K_ch, K_cc)
+                    frontier_carrier_sigma = sigma_c.reshape(1).expand(n_batch)
+                # K_carrier only when set, so Model B subclasses written before it existed still work
+                if K_carrier is None:
+                    latent_charges, frontier_reference_charges, frontier_occupation, \
+                        smooth_min = self.model_b(z_raw, latent_local_addition, K, batch,
+                                                  carrier_count, n_batch,
+                                                  reference_total_charge,
+                                                  host_mask=host_mask)
+                else:
+                    latent_charges, frontier_reference_charges, frontier_occupation, \
+                        smooth_min = self.model_b(z_raw, latent_local_addition, K, batch,
+                                                  carrier_count, n_batch,
+                                                  reference_total_charge,
+                                                  host_mask=host_mask, K_carrier=K_carrier)
                 if compute_energy:
                     onehot = segment_onehot(batch, n_batch, positions.dtype)
                     # the candidates' electrostatic cost already sits inside the smooth
@@ -498,6 +533,8 @@ class Les(nn.Module):
             # added again
             output['E_reference_lr'] = frontier_reference_energy
             output['E_frontier'] = frontier_addition_energy
+            if frontier_carrier_sigma is not None:
+                output['carrier_sigma'] = frontier_carrier_sigma        # [n_batch]
         return output
 
 class _DummyAtomwise(nn.Module):
