@@ -52,6 +52,9 @@ One thing that can be changed is 'remove_self_interaction'. Setting 'remove_self
 ## 📣 Update 
 
 
+### 23rd Nov 2026
+Charge equilibration is added (`use_qeq: True`): the charges of the selected atoms minimise the electrostatic energy plus `χ q + ½ J q²`. The Siepmann–Sprik electrode (MetalWall: `χ = 0`, `J = 0`) is the additional flag `qeq_siepmann_sprik: True`. Charge offsets can be limited to chosen elements (`charge_offset_atomic_numbers`) and to one axis (`charge_offset_axis`). All flags: [docs/qeq.md](docs/qeq.md).
+
 ### 18th Nov 2026
 Charge offsets are added (`charge_offset_mode: True`): the latent multipoles of each atom can sit off the atom, at r_i + δ_i.
 

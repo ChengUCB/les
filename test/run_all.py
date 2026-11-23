@@ -34,6 +34,7 @@ PYTEST_TARGETS = [
     "test/test_ewald_realspace",
     "src/les/tests",
     "test/test_charge_offsets.py",                                 # off-site charges
+    "test/test_qeq.py",                                            # charge equilibration, MetalWall
 ]
 
 # script targets: (path, extra argv, checks_itself)

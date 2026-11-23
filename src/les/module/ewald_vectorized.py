@@ -144,6 +144,50 @@ class Ewald_vectorized(nn.Module):
         summed.scatter_add_(0, index_q, per_atom)
         return summed / volume.view(B, 1) / epsilon_0 + 1.0  # [B, n_q]
 
+    def compute_A_matrix(self, r, cell, batch) -> torch.Tensor:
+        """
+        Charge-charge coupling matrix of the atoms r, A = d^2 E / dq dq with the Gaussian self
+        energy on the diagonal: for monopoles and remove_self_interaction=False, E = 1/2 q^T A q
+        per structure. Block diagonal over the structures. Used by the charge equilibration.
+        """
+        device = r.device
+        dtype = r.dtype
+        N = r.shape[0]
+        batch = batch.to(device=device, dtype=torch.long)
+        same_batch = batch.unsqueeze(1) == batch.unsqueeze(0)               # [N, N]
+        eye = torch.eye(N, device=device, dtype=dtype)
+
+        if not self.is_periodic:
+            r_ij = r.unsqueeze(0) - r.unsqueeze(1)                          # [N, N, 3]
+            dist = (r_ij.pow(2).sum(dim=-1) + eye).pow(0.5)                 # diagonal: 1, replaced below
+            a = 1.0 / (self.sigma * (2.0 ** 0.5))
+            A = torch.special.erf(dist * a) / dist / self.twopi * (1.0 - eye)
+            A = A + eye * (2.0 / (self.sigma * self.twopi ** 1.5))
+        else:
+            # steps 1-4 of compute_potential_triclinic
+            cell = cell.to(dtype=dtype)
+            B = cell.shape[0]
+            nvec = self.nvec_all.to(device=device, dtype=dtype)             # [K, 3]
+            K = nvec.shape[0]
+            G = 2 * torch.pi * torch.linalg.inv(cell).transpose(-2, -1)     # [B, 3, 3]
+            volume = torch.det(cell)                                        # [B]
+            kvec = torch.bmm(nvec.unsqueeze(0).expand(B, -1, -1), G)        # [B, K, 3]
+            k_sq = (kvec ** 2).sum(dim=-1)                                  # [B, K]
+            valid_mask = (k_sq > 0) & (k_sq <= self.k_sq_max) & self.hemisphere_mask.unsqueeze(0)
+            weight = torch.exp(-self.sigma_sq_half * k_sq) / (k_sq + 1e-12)
+            weight = weight * self.factors.to(device=device, dtype=dtype).unsqueeze(0) * valid_mask.to(dtype=dtype)
+
+            onehot_t = (batch.unsqueeze(1) == torch.arange(B, device=device).unsqueeze(0)).to(dtype)  # [N, B]
+            kvec_for_atoms = torch.matmul(onehot_t, kvec.reshape(B, K * 3)).reshape(N, K, 3)
+            k_dot_r = (kvec_for_atoms * r.unsqueeze(1)).sum(dim=-1)         # [N, K]
+            cos_kr = torch.cos(k_dot_r)
+            sin_kr = torch.sin(k_dot_r)
+            prefactor = torch.matmul(onehot_t, weight * 2.0 / volume.view(B, 1))   # [N, K]
+            # Re[e^{-i k r_i} e^{i k r_j}] = cos cos + sin sin; the i = j term is the self energy
+            A = (torch.matmul(cos_kr * prefactor, cos_kr.transpose(0, 1))
+                 + torch.matmul(sin_kr * prefactor, sin_kr.transpose(0, 1)))
+        return A * same_batch.to(dtype) * self.norm_factor
+
     def compute_potential_realspace(self, r, q, cell, batch,
                                     u: Optional[torch.Tensor] = None,
                                     quad: Optional[torch.Tensor] = None,

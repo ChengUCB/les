@@ -24,6 +24,7 @@ MLIPs. Pick yours below; each page shows the training script and explains the op
    :caption: Using LES
 
    library
+   qeq
    mace
    cace
    nequip

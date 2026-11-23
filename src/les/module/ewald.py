@@ -413,5 +413,47 @@ class Ewald(nn.Module):
                  }
         return output
 
+    def compute_A_matrix(self, r: torch.Tensor, cell: Optional[torch.Tensor], batch: torch.Tensor) -> torch.Tensor:
+        """
+        Charge-charge coupling matrix of the atoms r, A = d^2 E / dq dq with the Gaussian self
+        energy on the diagonal: for monopoles and remove_self_interaction=False, E = 1/2 q^T A q
+        per structure. Block diagonal over the structures. Used by the charge equilibration.
+        """
+        n = r.shape[0]
+        A = torch.zeros((n, n), device=r.device, dtype=r.dtype)
+        for i in torch.unique(batch).long():
+            idx = torch.nonzero(batch == i).squeeze(1)
+            r_now = r[idx]
+            box_now = cell[i] if cell is not None else None
+            if box_now is None or torch.linalg.det(box_now) < 1e-6:
+                eye = torch.eye(r_now.shape[0], device=r.device, dtype=r.dtype)
+                r_ij = r_now.unsqueeze(0) - r_now.unsqueeze(1)
+                dist = (r_ij.pow(2).sum(dim=-1) + eye).pow(0.5)  # diagonal: 1, replaced below
+                A_now = torch.special.erf(dist / (self.sigma * 2.0 ** 0.5)) / dist / self.twopi * (1.0 - eye)
+                A_now = A_now + eye * (2.0 / (self.sigma * self.twopi ** 1.5))
+            else:
+                # the k vectors of compute_potential_triclinic
+                G = 2 * torch.pi * torch.linalg.inv(box_now).T
+                norms = torch.norm(box_now, dim=1)
+                Nk = [max(1, int(n_now.item() / self.dl)) for n_now in norms]
+                n1 = torch.arange(-Nk[0], Nk[0] + 1, device=r.device)
+                n2 = torch.arange(-Nk[1], Nk[1] + 1, device=r.device)
+                n3 = torch.arange(-Nk[2], Nk[2] + 1, device=r.device)
+                nvec = torch.stack(torch.meshgrid(n1, n2, n3, indexing="ij"), dim=-1).reshape(-1, 3).to(G.dtype)
+                kvec = nvec @ G
+                k_sq = torch.sum(kvec ** 2, dim=1)
+                mask = (k_sq > 0) & (k_sq <= self.k_sq_max)
+                kvec = kvec[mask]
+                k_sq = k_sq[mask]
+                # every k and -k: 2 kfac / volume each; the i = j term is the self energy
+                prefactor = 2.0 * torch.exp(-self.sigma_sq_half * k_sq) / k_sq / torch.det(box_now)
+                k_dot_r = torch.matmul(r_now, kvec.T)
+                cos_kr = torch.cos(k_dot_r)
+                sin_kr = torch.sin(k_dot_r)
+                A_now = (torch.matmul(cos_kr * prefactor, cos_kr.T)
+                         + torch.matmul(sin_kr * prefactor, sin_kr.T))
+            A[idx.unsqueeze(1), idx.unsqueeze(0)] = A_now
+        return A * self.norm_factor
+
     def __repr__(self):
         return f"Ewald(dl={self.dl}, sigma={self.sigma}, remove_self_interaction={self.remove_self_interaction})"
